@@ -42,6 +42,11 @@ export interface AuthenticatedUser {
   email: string;
   isActive: boolean;
   isEmailVerified: boolean;
+  // Populated ONLY by the embedded-claims RBAC strategy (baked into the JWT/session at
+  // login/refresh). db-live leaves these empty and resolves them via a live DB lookup in
+  // IAuthorizationProvider.getContext(). Guards never trust a client-supplied value here.
+  roles?: string[];
+  permissions?: string[];
 }
 ```
 
@@ -64,7 +69,10 @@ export interface AuthResult {
 }
 
 export interface IAuthStrategy {
-  login(credentials: LoginDto, meta: RequestMeta): Promise<AuthResult>;
+  // `login` receives the already-authenticated user — the auth service (modules/auth/)
+  // does the lookup + password verification. Strategies stay free of UserRepository/
+  // PasswordService (see §10 constructor signatures).
+  login(user: AuthenticatedUser, meta: RequestMeta): Promise<AuthResult>;
   refresh(refreshInput: unknown, meta: RequestMeta): Promise<AuthResult>;
   logout(userId: string, sessionRef: unknown): Promise<void>;
   validateRequest(req: FastifyRequest): Promise<AuthenticatedUser | null>; // used by AuthGuard
@@ -92,6 +100,7 @@ export interface UserRepository {
   findByEmail(email: string): Promise<User | null>;
   create(data: { email: string; passwordHash: string }): Promise<User>;
   updatePassword(id: string, passwordHash: string): Promise<void>;
+  assignRole(userId: string, roleId: string): Promise<void>; // idempotent
   findRolesAndPermissions(id: string): Promise<{ roles: string[]; permissions: string[] }>;
 }
 
@@ -226,8 +235,80 @@ input, `subject` is case-sensitive and must match `permissions.subject` verbatim
 - CSRF on only when cookie sessions active.
 - App refuses to boot on invalid secrets.
 
+## 10. Strategy constructor signatures (frozen)
+
+Frozen by the strategy-interfaces wave. Wave 4 agents fill in the method **bodies** of
+these classes and must NOT change the class names, the constructor parameter lists
+(types or order), the module files, or the factory `inject` arrays below. Everything the
+constructors receive is already wired by `AuthStrategiesModule.register()` /
+`RbacStrategiesModule.register()`.
+
+### Concrete classes
+
+```ts
+// auth-strategies/jwt-stateless/jwt-stateless.auth-strategy.ts
+export class JwtStatelessAuthStrategy implements IAuthStrategy {
+  constructor(
+    private readonly refreshTokens: RefreshTokenRepository,
+    private readonly users: UserRepository,   // re-resolves identity + claims fresh on refresh
+    private readonly jwt: JwtService,
+    private readonly config: AppConfig,
+  ) {}
+}
+
+// auth-strategies/session-redis/session-redis.auth-strategy.ts
+export class SessionRedisAuthStrategy implements IAuthStrategy {
+  constructor(
+    private readonly redis: Redis,          // ioredis, injected as REDIS_CLIENT
+    private readonly config: AppConfig,
+  ) {}
+}
+
+// rbac-strategies/embedded-claims/embedded-claims.authorization-provider.ts
+export class EmbeddedClaimsAuthorizationProvider implements IAuthorizationProvider {
+  constructor(private readonly config: AppConfig) {}
+}
+
+// rbac-strategies/db-live/db-live.authorization-provider.ts
+export class DbLiveAuthorizationProvider implements IAuthorizationProvider {
+  constructor(
+    private readonly users: UserRepository,
+    private readonly redis: Redis,          // ioredis, injected as REDIS_CLIENT
+    private readonly config: AppConfig,
+  ) {}
+}
+```
+
+`Redis` is the `ioredis` default/named export. `AppConfig` is the validated-config
+service from `config/app-config.service.ts`; JWT issuer/audience/TTLs are NOT on it —
+read them from `config/constants.ts` (`DEFAULT_JWT_*`). `JwtService` comes from
+`JwtModule.registerAsync()` inside `AuthStrategiesModule`, driven by `AppConfig`
+(RS256 → private/public key, HS256 → secret).
+
+### Factory `inject` arrays (`src/*-strategies/*.module.ts`)
+
+```ts
+// AuthStrategiesModule.register()
+inject: [AppConfig, JwtService, REFRESH_TOKEN_REPOSITORY, USER_REPOSITORY, REDIS_CLIENT]
+
+// RbacStrategiesModule.register()
+inject: [AppConfig, USER_REPOSITORY, REDIS_CLIENT]
+```
+
+Both modules are `@Global()`, provide their token (`AUTH_STRATEGY_TOKEN` /
+`AUTHZ_PROVIDER_TOKEN`) via `useFactory` keyed off `AppConfig.AUTH_STRATEGY` /
+`AppConfig.RBAC_STRATEGY`, and export only that token. Each module also provides its own
+`REDIS_CLIENT`: a real `ioredis` client when the module's own strategy needs Redis and
+`REDIS_URL` is set, otherwise a stub that throws on any method call (so DI resolves under
+the default Redis-free env).
+
 ## Change log
 
 | Date | Change | By |
 |------|--------|----|
 | 2026-09-11 | Seeded from plan.md + implementation.spec.md; DB_PROVIDER set to prisma/drizzle/sequelize/mongoose (Mongoose replaces TypeORM per user) | orchestrator |
+| 2026-09-11 | Added optional `roles`/`permissions` to `AuthenticatedUser` (needed by embedded-claims; see §2) | orchestrator |
+| 2026-09-11 | `IAuthStrategy.login` now takes `user: AuthenticatedUser` (was `credentials: LoginDto`) — strategies issue sessions for a verified user; the auth service verifies credentials | orchestrator |
+| 2026-09-11 | Added `UserRepository` to `JwtStatelessAuthStrategy` constructor (was too thin: `refresh()` could not rebuild email/flags/RBAC claims). `refresh()` now re-resolves identity + claims fresh from the DB | orchestrator |
+| 2026-09-11 | Added `assignRole(userId, roleId)` to `UserRepository` (register flow needs to assign the default role; no method existed) — idempotent across all four adapters | orchestrator |
+| 2026-09-11 | Added §10 — frozen strategy constructor signatures + factory `inject` arrays | strategy-interfaces-agent |
