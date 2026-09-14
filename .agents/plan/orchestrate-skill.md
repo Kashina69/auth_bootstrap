@@ -3,6 +3,11 @@
 Distilled from Waves 1–8 of the auth+rbac build. Binding on the orchestrator (the main
 chat). Workers never read this file — it tells the orchestrator how to *dispatch* them.
 
+**Read §2 before anything else.** It is the dispatch decision: whether to spawn an agent at all
+(§2a), how wide to scope it (§2b), and how to make parallel work safe (§2c). Everything after it
+is detail on executing a decision §2 already made. The short version: **fewer agents, each
+owning more, in smaller waves** — and often none at all.
+
 Companion docs: `plan.agent.md` (the wave schedule), `MEMORY.md` (build log + decisions),
 `WAVE-LOG.md` (per-wave ledger: agents, tokens, gate, issues, security). This file is the
 *process*; those are the *content*.
@@ -28,26 +33,100 @@ Measured agent costs, Waves 5–6:
 | verifier (full-tree) | audit everything | 68.0k | 40 |
 | verifier (diff-scoped) | audit one wave's diff | 59.8k | 28 |
 
-Two conclusions:
+Three conclusions:
 
-- **Cost scales with scope, not with layer count.** Splitting one task into three agents does
-  not divide its cost three ways — each agent re-pays the orientation tax (locating files,
-  reading contracts) plus a share of the work. Merge small related work into one agent.
+- **Cost ≈ scope + a fixed orientation tax.** Splitting one task into three agents does not
+  divide its cost three ways — each agent re-pays the orientation tax (locating files, reading
+  contracts) on top of its share of the work. Merging small related work into one agent is
+  almost always cheaper than splitting it.
 - **The orientation tax is real and reducible.** Agents burned 20–120 tool calls mostly
-  *finding* things. Give exact paths and line ranges and it drops sharply.
+  *finding* things. Exact paths and line ranges cut it sharply (§6).
+- **Hallucination is what you buy when you under-pay the orientation tax.** An agent that cannot
+  find an interface **guesses** it. Guessed interfaces are the largest single source of rework in
+  this project's history. The fix is never "a better agent" — it is copying the frozen signature
+  into the prompt and narrowing the read list, so there is nothing left to guess.
 
-## 2. Wave sizing — the biggest lever
+## 2. Granularity — one agent per SECTION, never per file
 
-- **One agent per genuinely independent deliverable**, where "independent" means *no shared
-  file and no unfrozen interface between them*. Not per layer.
-- **Never** split a single coherent change across agents to "parallelize" it — that creates
-  interface guessing and rework. **Never** merge two independent verticals into one agent —
-  that serializes them and bloats one context.
-- **Prefer smaller waves.** Wave 6 cost 353k vs Wave 5's 292k *despite* using fewer agents,
-  because its scope was larger and it needed a defect-fix round. The verify→fix cycle cost
-  178k — half the wave. Scope discipline beats agent-count optimization.
-- Rough guide: one agent ≈ 40–120k. Budget the wave before dispatching and say the number out
-  loud so a runaway scope is visible early.
+The unit of dispatch is a **section**: a vertically cohesive deliverable an agent can own
+end-to-end — one module's whole test suite, one API vertical, all implementations of one
+interface. Not a file, not a layer, not an endpoint.
+
+**Measured, from this project's own planning.** The test plan's first draft proposed **four
+agents for four ORM adapters**. Those four adapters share *one* contract test. Four agents would
+each re-read `CONTRACTS.md` §5, re-learn the harness and re-locate the adapters — four
+orientation taxes for work that is mechanically identical. One agent writes all four specs for
+barely more than the cost of one. The rule that produced:
+
+| Do | Don't |
+|---|---|
+| one agent owns a whole module's tests | one agent per test file |
+| one agent owns a whole API vertical | one agent per endpoint |
+| one agent owns **all N** implementations of one interface | one agent per implementation |
+| one agent owns all remaining gaps in a subsystem | one agent per untested file |
+
+**Two rules that look contradictory and are not:**
+
+- **Fewer, larger agents per wave** (§2a) — slice the wave by *section*.
+- **Smaller waves overall** (§2b) — keep each wave's *total scope* moderate.
+
+Both hold. Wave 6 cost 353k vs Wave 5's 292k *despite* using fewer agents, because the wave's
+total scope was larger and it needed a defect-fix round (verify→fix alone was 178k — half the
+wave). Scope and granularity are separate dials: turn total scope **down**, turn per-agent scope
+**up**.
+
+### 2a. The dispatch decision — run this before creating any agent
+
+Ask in order; the first "yes" wins.
+
+1. **Can I name every file I will edit, right now?** → **do it inline. Dispatch nobody.** You
+   already hold the context; an agent pays the orientation tax to re-derive it, and you pay a
+   hand-off seam on top. Wave 8 (two endpoints, one hook, three specs, one e2e suite) was built
+   this way for **0 agent tokens**, against 292–353k for the waves before it.
+2. **Will two workstreams edit the same file?** → that file is **orchestrator work in a Wave 0**
+   (§2c); then the workstreams run in parallel without it.
+3. **Is it under ~10 lines and needing no exploration?** → orchestrator (§7).
+4. **Otherwise** → **one agent per section**, dispatched in parallel with the others.
+
+Honest caveat on (1): it applies only if you have *already* paid to load that context. Starting
+cold would mean reading ten files to begin, and then an agent's orientation tax is buying you
+something real. The test is "can I name the files", not "does this feel small".
+
+### 2b. Sizing, and the concurrency ceiling
+
+- **Target 40–120k per agent.** Budget the wave before dispatching, and say the number out loud
+  so a runaway scope is visible early rather than at the end.
+- **A section agent past ~150k has left its section.** Stop it and re-scope. **Do not subdivide
+  it into more agents** — that multiplies the orientation tax you were trying to avoid.
+  Re-scoping means "smaller deliverable", never "more workers".
+- **Four to five concurrent agents is the practical ceiling.** Past that, merge-and-verify cost
+  grows faster than wall-clock falls, and the odds that two agents unknowingly share a file
+  approach one.
+- **Parallelism only pays for genuinely independent sections.** The wall-clock floor is the
+  longest single section — adding agents that must be serialized afterwards buys nothing.
+- **Wall clock is not the only axis.** Do not parallelize to look fast. A wave that finishes in
+  20 minutes with two agents is better than one that finishes in 12 with five and needs a merge
+  repair — the repair is unplanned, and it is where the security regressions live.
+
+### 2c. What makes parallelism safe — clear the shared boundaries first
+
+Parallel agents are safe only when **no two can write the same byte**. Before dispatching any
+concurrent wave, the orchestrator runs a **Wave 0** that clears every shared boundary:
+
+- **Manifests and config** — `package.json`, lockfiles, tsconfig, vitest/lint configs, `.env`
+  samples. If two agents both need a new script or config entry, **neither** writes it.
+- **Shared test harnesses and fixtures** — one agent's helper is another's dependency. Freeze it
+  before dispatch and mark it **do-not-touch**; an agent needing a change **reports** it.
+- **Interfaces** — frozen and copied into every prompt (§4, §5).
+- **Entry points** — `main.ts`, `app.module.ts`, composition roots. Usually small enough to be
+  orchestrator work regardless (§7).
+
+Then, per agent: an explicit **owned-path list**, and an explicit **do-not-touch list that names
+the other agents' paths**. An agent that does not know what its neighbours own will wander into
+them.
+
+**If you cannot clear the shared boundaries, the wave is not ready to parallelize.** Run it
+sequentially — slower, but recoverable. A merge conflict between two agents is neither.
 
 ## 3. Pre-flight — orchestrator only, before ANY dispatch
 
@@ -67,8 +146,10 @@ Agents burn tokens discovering things the orchestrator can find in one command. 
 
 ## 4. Interface freezing — what makes concurrency safe
 
-Concurrency is only safe when every shared boundary is already frozen *and written into each
-dispatch prompt*. Before dispatching parallel agents:
+§2c is the general rule (clear **every** shared boundary, including manifests and harnesses).
+This section is the part that specifically concerns *interfaces*: concurrency is only safe when
+every shared boundary is already frozen *and written into each dispatch prompt*. Before
+dispatching parallel agents:
 
 - Write the exact signatures they will share into `CONTRACTS.md` (with a change-log row), or
   inline them in the prompts if they are new and local.
@@ -104,20 +185,10 @@ agents for work that needs reading, writing, and iterating.
 
 ### 6a. Sometimes dispatch no agent at all — Wave 8's rule
 
-Wave 8 (two endpoints, one hook, three spec files, one e2e suite) was built entirely inline and
-cost **0 agent tokens**, against 292k–353k for the waves before it. The distinguishing property
-is not size, it is **whether the work requires exploration**:
-
-| Dispatch an agent when the work needs… | Do it inline when… |
-|---|---|
-| reading unfamiliar code to decide *what* to write | every interface is frozen and written down |
-| iterating against a spec it must first locate | you already have the files in context |
-| a vertical spanning many files it must discover | the change is a handful of files at known paths |
-
-The honest caveat: this only applies if the orchestrator has *already* paid to load that context
-(it had, after a full wave of review). If you would have to read ten files to start, an agent's
-orientation tax is buying you something. **Test before dispatching: can I name every file I will
-edit, right now?** If yes, an agent adds cost and a hand-off seam for nothing.
+See **§2a**, which is the canonical form of this rule. Short version: if you can name every file
+you will edit right now, dispatch nobody — Wave 8 (two endpoints, one hook, three spec files, one
+e2e suite) was built entirely inline for **0 agent tokens**. The test is "can I name the files",
+not "does this feel small".
 
 ## 7. The gate — orchestrator runs it
 
@@ -219,6 +290,8 @@ items. This is what makes an eventual external validation pass possible without 
 
 | Anti-pattern | What it cost |
 |---|---|
+| **One agent per file / per implementation of one interface** | N × the orientation tax for work that was mechanically identical (§2). Caught in the test plan's first draft before it was run |
+| **Parallelizing without clearing shared files first** | merge conflicts between agents, or silent overwrites — the class of repair that introduces security regressions. See §2c |
 | Integration agent re-verifying what another agent already checked | 47k |
 | Deferring dependency discovery to the worker | agent thrashing, rework |
 | Letting a spec encode a bug as a passing test | defect shipped past a green gate |
@@ -226,6 +299,7 @@ items. This is what makes an eventual external validation pass possible without 
 | `build`+`test` green treated as sufficient gate | 3 latent type errors, 2 waves |
 | Asserting a fact from a grep without checking the entity | a whole fix-round aimed wrong |
 | Oversized wave | Wave 6 at 353k vs Wave 5's 292k |
+| Subdividing an over-budget agent into more agents | multiplies the tax you were avoiding; re-scope the deliverable instead (§2b) |
 | Trusting a synthetic probe as proof of the real path | 2 false alarms; one fix destroyed |
 | `git checkout --` on a file holding uncommitted wave work | 62k to re-apply |
 | Registering a global guard/interceptor without checking non-HTTP contexts | 3 runtime crashes invisible to the entire gate |
@@ -248,7 +322,25 @@ convenience.
 
 ## 13. Standing rule
 
-The orchestrator owns: pre-flight, interface freezing, wiring under ~10 lines, the gate,
-tier-0 spot-checks, the ledger, and all commits. Agents own: discovering, writing, and
-iterating on real work inside explicitly owned paths. **Anything the orchestrator can verify in
-one command, the orchestrator verifies** — an agent doing it is pure waste.
+The orchestrator owns: pre-flight, interface freezing, clearing shared boundaries (§2c), wiring
+under ~10 lines, the gate, tier-0 spot-checks, the ledger, and all commits. Agents own:
+discovering, writing and iterating on real work inside explicitly owned paths. **Anything the
+orchestrator can verify in one command, the orchestrator verifies** — an agent doing it is pure
+waste.
+
+**The default is fewer agents than you think.** Every dispatch decision runs through §2a first.
+The failure mode of a capable orchestrator is not laziness — it is dispatching reflexively,
+because spawning an agent *feels* like progress. It usually is not: it converts context you
+already hold into a hand-off seam, and pays an orientation tax to get back to where you started.
+When in doubt, do it yourself; when it genuinely spans unfamiliar ground, send **one** agent and
+scope it **wide** rather than three agents scoped narrow.
+
+**The three dials, in priority order:**
+
+| Dial | Turn it | Why |
+|---|---|---|
+| **Total wave scope** | **down** | the dominant cost lever (§2b) |
+| **Per-agent scope** | **up** | fewer orientation taxes (§2) |
+| **Agent count** | **only as high as independent sections** | parallelism ≠ savings (§2b) |
+
+Fewer agents, each owning more, in smaller waves. That is the whole mentality.

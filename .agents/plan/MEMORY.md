@@ -657,3 +657,41 @@ orchestrator executes*, not something that spawns agents itself (the only harnes
 the ability to spawn subagents concurrently), and §5 now carries **copy-paste dispatch prompts**
 for each of the four sections, so the orchestrator's dispatching is mechanical rather than
 improvised.
+
+### orchestrate-skill.md revised — §2 is now the dispatch decision (2026-09-14)
+
+The skill previously buried its most important rule in §2 ("one agent per genuinely independent
+deliverable") — abstract enough that the TEST-PLAN first draft ignored it and proposed four
+agents for four ORM adapters that share one contract test. Rewritten so the decision is
+unmissable and mechanical. **No section was renumbered**, so every existing cross-reference in
+`TEST-PLAN.md`, `PORT-*.md`, `WAVE-LOG.md` and `README.md` still resolves; the only edits to
+other files were three pointers that had drifted (`§2` → `§1`/`§2b`).
+
+What §2 now says:
+
+- **2a — the dispatch decision**, four ordered questions. First "yes" wins: can I name every file
+  I will edit right now → *do it inline, dispatch nobody*; will two workstreams edit the same
+  file → *that file is orchestrator Wave 0*; under ~10 lines and no exploration → *orchestrator*;
+  otherwise → *one agent per section*.
+- **2b — sizing and the concurrency ceiling**: 40–120k per agent; past ~150k it has left its
+  section (re-scope the *deliverable*, never subdivide into more agents); 4–5 concurrent agents
+  is the practical ceiling; parallelism does not reduce the wall-clock floor set by the longest
+  section.
+- **2c — what makes parallelism safe**: clear *every* shared boundary before dispatch —
+  manifests, configs, lockfiles, test harnesses, interfaces, entry points. If you cannot, run it
+  sequentially; a merge conflict between agents is neither cheap nor safe.
+
+§1 gained the third conclusion that ties cost to quality: **hallucination is what you buy when
+you under-pay the orientation tax** — an agent that cannot find an interface guesses it, and
+guessed interfaces are the largest single source of rework in this project's history. The fix is
+never a better agent; it is copying the frozen signature into the prompt and narrowing the read
+list so there is nothing left to guess.
+
+§13 now states the mentality as three dials in priority order: turn **total wave scope down**,
+turn **per-agent scope up**, and raise **agent count** only as high as there are genuinely
+independent sections. Plus the failure mode worth naming: a capable orchestrator does not fail by
+laziness, it fails by dispatching reflexively — spawning an agent *feels* like progress while it
+converts context you already hold into a hand-off seam.
+
+Two anti-pattern rows added: "one agent per file / per implementation of one interface" and
+"parallelizing without clearing shared files first".

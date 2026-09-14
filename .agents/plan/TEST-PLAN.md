@@ -40,8 +40,8 @@ parallelism safe — not so that each agent has minimal scope.
 
 **Context and cost expectations:** each section agent should land around **40–100k tokens**.
 If one blows past ~150k, it has drifted outside its section — stop it and re-scope rather than
-letting it keep going. §2 of `orchestrate-skill.md` has the measured per-agent figures this is
-based on.
+letting it keep going. §1 of `orchestrate-skill.md` has the measured per-agent figures this is
+based on, and §2b the sizing and concurrency-ceiling rules.
 
 **The orchestrator's own job, unchanged from `orchestrate-skill.md` §13:** run the gate, do the
 small wiring yourself, spot-check claims in one command rather than delegating, and own the
@@ -261,7 +261,7 @@ reason parallelism is safe afterwards.
 picked up later or folded into a follow-up. A, B and C are the ones that close real holes.
 
 **Sizing guard:** each agent should land near **40–100k tokens**. Past ~150k it has left its
-section — stop it and re-scope (`orchestrate-skill.md` §2). Do **not** subdivide a section that
+section — stop it and re-scope (`orchestrate-skill.md` §2b). Do **not** subdivide a section that
 is running long; that just multiplies the orientation tax.
 
 ### Wave 2 — orchestrator gate + one verifier

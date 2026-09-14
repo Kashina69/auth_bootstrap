@@ -133,7 +133,7 @@ Everything a resuming chat needs is in **`.agents/plan/`** — read them in this
 
 | File | What it is | Read it when |
 |---|---|---|
-| `orchestrate-skill.md` | **How to run this build with subagents** — wave sizing, dispatch prompt template, the gate, the anti-pattern table, §6a ("sometimes dispatch no agent") | first, if you intend to dispatch agents |
+| `orchestrate-skill.md` | **How to run this build with subagents** — §2 is the dispatch decision (whether to spawn an agent at all, how wide to scope it, how to make parallel work safe), then the prompt template, the gate, verification tiers and the anti-pattern table | first, if you intend to dispatch agents |
 | `MEMORY.md` | Build log: every decision + rationale, and the end-of-wave checkpoint | to learn *why* anything is the way it is |
 | `CONTRACTS.md` | The frozen interfaces (§1–§10) and the `modules/auth/` surface (§11). **Workers never edit this** | before writing code against any interface |
 | `WAVE-LOG.md` | Per-wave ledger: agents, token cost, gate results, defects, and open items S1–S15 with severity | to pick up a known defect |

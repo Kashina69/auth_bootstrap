@@ -266,7 +266,7 @@ each removed file must be replaced by a test at the new seam.
 
 ## 8. Wave plan for agents
 
-Sequenced so that nothing parallel shares a file. Budget per `orchestrate-skill.md` §2 (~40–120k
+Sequenced so that nothing parallel shares a file. Budget per `orchestrate-skill.md` §2b (~40–120k
 per agent) and do the small waves yourself (§6a).
 
 **Wave 0 — orchestrator, no agents.** Establish the seam. Pick Option A or B from §3a. Lift the
