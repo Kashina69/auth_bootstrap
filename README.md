@@ -1,61 +1,131 @@
-# auth — NestJS Auth + RBAC Bootstrap
+# auth — NestJS Auth + RBAC Service
 
-Drop-in, DB-backed, ORM-agnostic authentication + RBAC module for NestJS 12 (Fastify).
+A drop-in, database-backed **authentication + RBAC (role-based access control)**
+service built with **NestJS 12 on Fastify**. It exposes every operation over
+**both REST and GraphQL** (same rules, same service methods — neither transport
+can drift from the other), and its auth mechanism, authorization source, and
+database layer are all **pluggable strategies** picked via environment variables.
+No code changes needed to switch from JWTs to Redis sessions, from cached claims
+to live DB lookups, or from Postgres/Prisma to Mongo/Mongoose.
 
-## Current state + how to resume (waves 1–7 of 8 done; verified 2026-09-14)
+## What it does
 
-**To resume:** read `.agents/plan/orchestrate-skill.md` **first** — it is the process
-(wave sizing, pre-flight, dispatch template, the gate, verification, the ledger). Then
-`.agents/plan/MEMORY.md` for the build log and the latest checkpoint, and
-`.agents/plan/WAVE-LOG.md` for the per-wave ledger (agents, token costs, defects, and the
-numbered open-security-items table S1–S15).
+- **Auth flows** — `register`, `login`, `refresh` (rotating, single-use refresh
+  tokens with reuse detection), `logout`. Passwords are `argon2id`-hashed with
+  timing-attack-safe verification; failed logins get one generic error message
+  so accounts can't be enumerated.
+- **RBAC** — roles, permissions (`action:subject`, e.g. `manage:User`), grants,
+  and user-role assignment, seeded from one JSON file (`src/database/seed/`)
+  and editable at runtime through the admin API. Framework-free `can()` /
+  `hasRole()` core plus `@Permissions()` / `@Roles()` guards.
+- **Security defaults** — helmet headers, per-route rate limits, global input
+  validation, response envelope, GraphQL depth/complexity limits, CORS
+  deny-all unless explicitly configured, fail-fast env validation (the app
+  refuses to boot on bad config).
 
-**Gate at this checkpoint:** `pnpm build` exit 0 · `pnpm test` **13 files / 94 tests passed** ·
-`pnpm exec tsc --noEmit` clean · `pnpm exec oxlint src/ test/` clean · app **boots** and serves
-`/graphql` + 12 REST routes, with real requests verified end-to-end.
+## Strategy matrix (all env-selected, zero code changes)
 
-Plan docs under `.agents/plan/`:
+| Concern | Option A (default) | Option B |
+|---|---|---|
+| Session | `jwt-stateless` — signed access token (15m) + rotating refresh token (30d), `Bearer` header, no server state | `session-redis` — server-side session in Redis, httpOnly `sid` cookie (experimental, see below) |
+| Authorization | `embedded-claims` — roles/permissions baked into the token, zero DB hits, changes apply on refresh | `db-live` — resolved live per request (5s Redis cache + instant invalidation on admin changes) |
+| Database | `prisma` (Postgres) | `drizzle`, `sequelize` (Postgres) or `mongoose` (Mongo) |
 
-- `plan.md` — the architecture (pluggable strategies, schema, `rbac-core`, REST+GraphQL parity)
-- `implementation.spec.md` — the security-critical code spec (argon2, JWT pinning, refresh rotation, `can()`, guards, rate limiting, env validation, multi-ORM)
-- `plan.agent.md` — the orchestrator + subagent wave schedule
-- `CONTRACTS.md` — the frozen interfaces (DI tokens, repository contracts, strategy constructors), with a change log
-- `STYLE.md` — the binding code-style contract
-- `MEMORY.md` — running build log + decisions + latest checkpoint
-- `WAVE-LOG.md` — per-wave ledger: agents, tokens, gate results, defects, open security items
-- `orchestrate-skill.md` — how to run the build with subagents efficiently (read this to continue)
+## Quick start
 
-### What exists
+See **[setup.md](./setup.md)** for the full guide (Docker Postgres/Redis,
+migrations, seed, first login). Short version:
 
-- `src/config/` — zod-validated env (`AUTH_STRATEGY`, `RBAC_STRATEGY`, `DB_PROVIDER`, optional `CORS_ORIGINS`), fail-fast boot.
-- `src/common/` — DI tokens, exception filter, redacting/logging + transform + timeout interceptors (all transport-aware).
-- `src/common/decorators/` + `src/common/guards/` — `@Public`/`@Roles`/`@Permissions`/`@CurrentUser`, `AuthGuard`, `RbacGuard`, `GraphqlThrottlerGuard`.
-- `src/common/security/` — `PasswordService` (argon2id) and `LoginAttemptService` (per-account lockout, degrades safely without Redis).
-- `src/database/` — six-table schema + migrations + four repository contracts with **Prisma / Drizzle / Sequelize / Mongoose** adapters behind a `DB_PROVIDER` switch, plus an idempotent seed (`pnpm seed:rbac`).
-- `src/rbac-core/` — framework-agnostic `can()`/`hasRole()`/`hasAnyPermission()` (zero deps).
-- `src/auth-strategies/` — `jwt-stateless` (JWT + rotating refresh token w/ reuse detection) and `session-redis` (Redis session + cookie).
-- `src/rbac-strategies/` — `embedded-claims` (baked claims) and `db-live` (live lookup + 5s cache).
-- `src/modules/auth/` — `AuthService`, DTOs, REST controller, GraphQL resolver.
-- `src/modules/rbac-admin/` — runtime role/permission CRUD (REST + GraphQL), every route behind `manage:User`.
-- `src/graphql/` — Apollo code-first bootstrap with query depth/complexity limits.
-- `src/main.ts` — helmet, conditional CSRF, CORS (deny-all unless configured), global validation/interceptors/filters.
+```bash
+cp .example.env .env
+# start Postgres, apply src/database/migrations/*.sql, then:
+pnpm install
+pnpm seed:rbac
+pnpm start:dev
+```
 
-### What's left
+Every variable is documented in **`.example.env`** — copy it and you get a
+working local config.
 
-- **Wave 8** — `frontend-kit-agent` ∥ `test-agent`: unit + e2e coverage, `/auth/me` + `/authz/check`
-  endpoints, React `usePermission()`, and `auth.guard.spec.ts` (S4).
+## API surface
 
-### Known open items (full detail + severity in `WAVE-LOG.md`)
+REST (all responses wrapped in `{ data, meta }`):
 
-- **S13 — GraphQL variables do not work.** Sending `variables` with a `LoginDto`-typed variable is
-  rejected at validation ("not usable as an input type"), so clients must inline literals. Found in
-  Wave 7, not fixed. **The most likely next thing to look at.**
-- **S1/S2 — `session-redis` is not shippable.** `logout` silently no-ops and the session cookie is
-  never attached. Both need a contract-level decision above the controller. Inert under the default
-  pairing (`jwt-stateless` + `embedded-claims`).
-- **S14/S15** — GraphQL throttle responses omit rate-limit headers and return HTTP 200; lockout
-  timing can reveal lockout state for a known address (deliberate, per spec §6).
-- **S9/S11** — `deletePermission` does not fan out `invalidate()`; the seed never updates an
-  existing permission row, so old rows keep `is_system = false`.
-- **S4** — no `auth.guard.spec.ts`; the `@Public()` bypass and the `req.user = user` assignment are
-  untested.
+| Method & path | Auth | Description |
+|---|---|---|
+| `POST /auth/register` | public | Create account, gets default `user` role |
+| `POST /auth/login` | public | Returns user + token pair |
+| `POST /auth/refresh` | public | Rotates the token pair |
+| `POST /auth/logout` | Bearer | Revokes session |
+| `GET /rbac-admin/roles` | `manage:User` | List all roles |
+| `POST /rbac-admin/roles` | `manage:User` | Create role |
+| `DELETE /rbac-admin/roles/:id` | `manage:User` | Delete custom role (system roles protected) |
+| `GET /rbac-admin/roles/:id/permissions` | `manage:User` | Grants of one role |
+| `POST /rbac-admin/roles/:id/permissions` | `manage:User` | Attach permissions **by name** |
+| `DELETE /rbac-admin/roles/:id/permissions` | `manage:User` | Detach permissions **by name** |
+| `GET /rbac-admin/permissions` | `manage:User` | List all permissions |
+| `DELETE /rbac-admin/permissions/:id` | `manage:User` | Delete custom permission |
+| `POST /rbac-admin/users/:userId/roles` | `manage:User` | Assign role to user |
+| `POST /graphql` | mixed | Mirror of all of the above (dev playground) |
+
+Passwords must contain a lowercase, uppercase, digit, and symbol character.
+
+## Configuration
+
+All knobs live in `.env` and are validated at boot — see [`.example.env`](./.example.env)
+for every variable, its possible values, and when to use each. Highlights:
+`NODE_ENV`, `PORT` (default 3000), `AUTH_STRATEGY`, `RBAC_STRATEGY`,
+`DB_PROVIDER`, `DATABASE_URL`, `JWT_ALGORITHM` + keys/secret, `REDIS_URL`
+(required for `session-redis` / `db-live`), `CORS_ORIGINS`.
+
+## Layout
+
+```
+src/
+  modules/auth/        login/register/refresh/logout (controller + resolver + service)
+  modules/rbac-admin/  runtime role/permission CRUD (controller + resolver + service)
+  auth-strategies/     jwt-stateless | session-redis (frozen IAuthStrategy)
+  rbac-strategies/     embedded-claims | db-live (frozen IAuthorizationProvider)
+  rbac-core/           framework-free can()/hasRole()/hasAnyPermission()
+  database/            schema + raw-SQL migrations + seed + 4 ORM adapters
+  common/              guards, decorators, filters, interceptors, argon2/lockout
+  config/              zod-validated env (env.schema.ts) + typed AppConfig
+  graphql/             Apollo code-first bootstrap (+ generated schema.gql)
+```
+
+## Scripts
+
+| Command | Purpose |
+|---|---|
+| `pnpm start:dev` | Watch-mode dev server |
+| `pnpm build` / `pnpm start` | Production build / run |
+| `pnpm seed:rbac` | Idempotent baseline seed (3 roles, 8 permissions) |
+| `pnpm test` | Unit suite (vitest, 13 files / 96 tests) |
+| `pnpm test:e2e` | End-to-end suite |
+| `pnpm lint` | oxlint |
+
+## Companion client
+
+`../client/` is a Next.js + shadcn testing UI for this service (auth flow lab,
+session inspector, RBAC admin console). It only calls the REST API — point it
+here with `NEXT_PUBLIC_API_URL=http://localhost:<PORT>`.
+
+## Known limitations
+
+- `session-redis` is experimental: logout no-ops and the cookie isn't attached
+  on all paths (open items S1/S2). Default pairing
+  (`jwt-stateless` + `embedded-claims`) is the stable path.
+- GraphQL `variables` are rejected on input-typed args — inline literals in
+  queries (open item S13).
+- No `GET /auth/me` yet; the session's user object comes back with every
+  auth response instead.
+- `deletePermission` doesn't fan out cache invalidation under `db-live`
+  (up to 5s stale, open item S9).
+
+## Continuing the agent-built waves
+
+This repo was built in orchestrated waves (7 of 8 done). To resume that
+process, read `.agents/plan/orchestrate-skill.md` first, then `MEMORY.md`
+(build log + checkpoint) and `WAVE-LOG.md` (ledger + open security items
+S1–S15). Wave 8 (remaining): e2e coverage, `/auth/me` + `/authz/check`,
+React `usePermission()`, `auth.guard.spec.ts`.
