@@ -51,6 +51,21 @@ export class MongooseRoleRepository implements RoleRepository {
     );
   }
 
+  /** The mirror of `attachPermissions`: `$pull` of a grant the role does not hold is a no-op. */
+  async detachPermissions(roleId: string, permissionIds: string[]): Promise<void> {
+    if (permissionIds.length === 0 || !Types.ObjectId.isValid(roleId)) return;
+    await this.models.Role.updateOne(
+      { _id: roleId },
+      {
+        $pull: {
+          permissionIds: {
+            $in: permissionIds.map((id) => new Types.ObjectId(id)),
+          },
+        },
+      },
+    );
+  }
+
   async listPermissions(roleId: string): Promise<Permission[]> {
     if (!Types.ObjectId.isValid(roleId)) return [];
     const role = await this.models.Role.findById(roleId).lean();
@@ -90,5 +105,6 @@ function toPermission(row: PermissionDocument): Permission {
     subject: row.subject,
     name: row.name,
     description: row.description,
+    isSystem: row.isSystem,
   };
 }

@@ -29,6 +29,7 @@ export const permissions = pgTable('permissions', {
   subject: text('subject').notNull(),
   name: text('name').notNull().unique(),
   description: text('description'),
+  isSystem: boolean('is_system').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

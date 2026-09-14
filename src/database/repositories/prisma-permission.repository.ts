@@ -28,13 +28,19 @@ export class PrismaPermissionRepository implements PermissionRepository {
    * invariant (plan.md §4) holds for every writer, including the seed and the RBAC admin
    * API. It is stored, not a Postgres generated column, because Prisma cannot express one.
    */
-  async create(data: { action: string; subject: string; description?: string }): Promise<Permission> {
+  async create(data: {
+    action: string;
+    subject: string;
+    description?: string;
+    isSystem?: boolean;
+  }): Promise<Permission> {
     const row = await this.prisma.permission.create({
       data: {
         action: data.action,
         subject: data.subject,
         name: permissionName(data.action, data.subject),
         description: data.description ?? null,
+        isSystem: data.isSystem ?? false,
       },
     });
     return toPermission(row);
@@ -56,5 +62,6 @@ function toPermission(row: PermissionRow): Permission {
     subject: row.subject,
     name: row.name,
     description: row.description,
+    isSystem: row.isSystem,
   };
 }

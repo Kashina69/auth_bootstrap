@@ -64,6 +64,13 @@ export class MongooseUserRepository implements UserRepository {
       permissions: dedupe(permissions.map((permission) => `${permission.action}:${permission.subject}`)),
     };
   }
+
+  /** The embedded `user_roles` join table is the `roleIds` array, so this is a reverse lookup. */
+  async findUserIdsByRole(roleId: string): Promise<string[]> {
+    if (!Types.ObjectId.isValid(roleId)) return [];
+    const users = await this.models.User.find({ roleIds: roleId }).select({ _id: 1 }).lean();
+    return users.map((user) => user._id.toString());
+  }
 }
 
 /** Stands in for `citext`: the stored value is lowercase, so the lookup must be too. */

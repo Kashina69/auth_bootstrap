@@ -27,12 +27,18 @@ export class SequelizePermissionRepository implements PermissionRepository {
     return rows.map(toPermission);
   }
 
-  async create(data: { action: string; subject: string; description?: string }): Promise<Permission> {
+  async create(data: {
+    action: string;
+    subject: string;
+    description?: string;
+    isSystem?: boolean;
+  }): Promise<Permission> {
     const row = await this.permissionModel.create({
       action: data.action,
       subject: data.subject,
       name: `${data.action}:${data.subject}`,
       description: data.description ?? null,
+      isSystem: data.isSystem ?? false,
     });
     return toPermission(row);
   }
@@ -49,5 +55,6 @@ function toPermission(row: PermissionModel): Permission {
     subject: row.subject,
     name: row.name,
     description: row.description,
+    isSystem: row.isSystem,
   };
 }

@@ -7,6 +7,7 @@ export interface PermissionDocument {
   /** Generated `"{action}:{subject}"` — the string `rbac-core.can()` checks against. */
   name: string;
   description: string | null;
+  isSystem: boolean;
   createdAt: Date;
 }
 
@@ -16,6 +17,7 @@ export const permissionSchema = new Schema<PermissionDocument>(
     subject: { type: String, required: true },
     name: { type: String, required: true, unique: true },
     description: { type: String, default: null },
+    isSystem: { type: Boolean, required: true, default: false },
   },
   {
     timestamps: { createdAt: true, updatedAt: false },

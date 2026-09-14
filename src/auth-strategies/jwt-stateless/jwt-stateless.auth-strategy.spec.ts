@@ -87,6 +87,7 @@ function createFakeUserRepository(): UserRepository {
     assignRole: () => Promise.resolve(),
     findRolesAndPermissions: () =>
       Promise.resolve({ roles: USER.roles ?? [], permissions: USER.permissions ?? [] }),
+    findUserIdsByRole: () => Promise.resolve([]),
   };
 }
 

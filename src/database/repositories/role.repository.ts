@@ -20,6 +20,7 @@ export interface RoleRepository {
   findAll(): Promise<Role[]>;
   create(data: { name: string; description?: string; isSystem?: boolean }): Promise<Role>;
   attachPermissions(roleId: string, permissionIds: string[]): Promise<void>;
+  detachPermissions(roleId: string, permissionIds: string[]): Promise<void>; // idempotent
   listPermissions(roleId: string): Promise<Permission[]>;
   delete(id: string): Promise<void>;
 }

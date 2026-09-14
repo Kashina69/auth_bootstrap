@@ -39,6 +39,7 @@ function createFakeUsers() {
       return Promise.resolve();
     },
     findRolesAndPermissions: () => Promise.resolve({ roles: ['user'], permissions: ['read:Post'] }),
+    findUserIdsByRole: () => Promise.resolve([]),
   };
 
   return { byEmail, roleAssignments, repository };
@@ -50,6 +51,7 @@ const roles: RoleRepository = {
   findAll: () => Promise.resolve([DEFAULT_ROLE]),
   create: () => Promise.reject(new Error('not used')),
   attachPermissions: () => Promise.resolve(),
+  detachPermissions: () => Promise.resolve(),
   listPermissions: () => Promise.resolve([]),
   delete: () => Promise.resolve(),
 };

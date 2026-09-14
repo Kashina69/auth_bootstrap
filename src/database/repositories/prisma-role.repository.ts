@@ -46,6 +46,14 @@ export class PrismaRoleRepository implements RoleRepository {
     });
   }
 
+  /** The mirror of `attachPermissions`, and idempotent for the same reason: `deleteMany` of
+   *  a grant that is not there is a no-op, not an error. */
+  async detachPermissions(roleId: string, permissionIds: string[]): Promise<void> {
+    await this.prisma.rolePermission.deleteMany({
+      where: { roleId, permissionId: { in: permissionIds } },
+    });
+  }
+
   async listPermissions(roleId: string): Promise<Permission[]> {
     const grants = await this.prisma.rolePermission.findMany({
       where: { roleId },
@@ -71,5 +79,6 @@ function toPermission(row: PermissionRow): Permission {
     subject: row.subject,
     name: row.name,
     description: row.description,
+    isSystem: row.isSystem,
   };
 }

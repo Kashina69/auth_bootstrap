@@ -24,4 +24,5 @@ export interface UserRepository {
   updatePassword(id: string, passwordHash: string): Promise<void>;
   assignRole(userId: string, roleId: string): Promise<void>; // idempotent (no-op if already assigned)
   findRolesAndPermissions(id: string): Promise<{ roles: string[]; permissions: string[] }>;
+  findUserIdsByRole(roleId: string): Promise<string[]>; // holders of a role — plan §5.5 invalidate() fan-out
 }

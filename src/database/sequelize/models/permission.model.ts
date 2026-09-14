@@ -13,6 +13,7 @@ export class PermissionModel extends Model<InferAttributes<PermissionModel>, Inf
   declare subject: string;
   declare name: string;
   declare description: string | null;
+  declare isSystem: CreationOptional<boolean>;
   declare createdAt: CreationOptional<Date>;
 }
 
@@ -28,6 +29,12 @@ export function initPermissionModel(sequelize: Sequelize): typeof PermissionMode
       subject: { type: DataTypes.TEXT, allowNull: false },
       name: { type: DataTypes.TEXT, allowNull: false, unique: true },
       description: { type: DataTypes.TEXT, allowNull: true },
+      isSystem: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        field: 'is_system',
+      },
       createdAt: { type: DataTypes.DATE, field: 'created_at' },
     },
     {

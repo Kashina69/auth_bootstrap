@@ -295,11 +295,60 @@ false, and `rbac-admin.service.spec.ts` encodes the flawed behaviour as a passin
 Corollary: attaching a runtime-created permission to a system role makes it permanently
 undeletable, because no detach method exists to undo the grant.
 
-**Root cause is a half-wired column, not a missing feature:** the DB already has
-`is_system BOOLEAN NOT NULL DEFAULT false` (migration line 22, `schema.prisma:43`,
-`drizzle/schema.ts:21`) — but the `Permission` interface in CONTRACTS §5 does not expose it,
-so the repositories drop it and the service had nothing to read. The fix is to surface an
-already-existing column, not a migration.
+**Root cause: `permissions` had no `is_system` column at all.** The orchestrator initially
+claimed the column already existed and that no migration was needed — **that was wrong.** The
+three cited hits are all on the **`roles`** table (`CREATE TABLE "roles"` at
+`migration.sql:22`, `Role.isSystem` at `schema.prisma:43`, `roles.isSystem` at
+`drizzle/schema.ts:21`); the `permissions` block (lines 30-39) has no such column, and `Role`
+already exposed `isSystem` in CONTRACTS §5 precisely because its column existed. The misread
+came from grepping `is_system|isSystem` and not checking which table each hit belonged to.
+The `contract-fix-agent` disproved it twice: by reading the migration block, and by `tsc`
+rejecting the widened `Permission` against the Drizzle select/insert and the generated Prisma
+client.
+
+### Fix applied (2026-09-14) — F1 closed
+
+Contract additions were frozen by the orchestrator in CONTRACTS §5 first (workers must not
+edit that file unilaterally), then implemented by one `contract-fix-agent`:
+
+- `Permission.isSystem: boolean` + optional `isSystem` on `PermissionRepository.create`.
+  **A migration WAS required and was added:**
+  `src/database/migrations/20260914000000_permission_is_system/migration.sql`
+  (`ALTER TABLE "permissions" ADD COLUMN "is_system" BOOLEAN NOT NULL DEFAULT false;`), plus
+  `Permission.isSystem @map("is_system")` in `schema.prisma`, `permissions.is_system` in
+  `drizzle/schema.ts`, and the field on the Sequelize/Mongoose permission models.
+- All four permission adapters return `isSystem`; so do the four **role** adapters, which
+  build `Permission` objects in their permission mappers.
+- `UserRepository.findUserIdsByRole(roleId)` + 4 adapters.
+- `RoleRepository.detachPermissions(roleId, permissionIds)` (idempotent) + 4 adapters, each
+  mirroring its own `attachPermissions` idiom.
+- `rbac-admin.service.ts`: the grant-derived `isBaselinePermission` heuristic and its false
+  comment are **deleted**; the guard now reads `permission.isSystem`. `invalidate()` fan-out
+  wired for `attachPermissions`/`detachPermissions`/`deleteRole` — `deleteRole` captures
+  holders via `findUserIdsByRole` **before** `roles.delete` (ordering is pinned by a test).
+- `rbac.seed.ts`: a permission is baseline iff declared in `rbac.seed.json`'s `permissions[]`
+  **or** granted by an `isSystem` role (union — the plan's JSON is inconsistent in both
+  directions). `rbac.seed.json` itself left byte-identical to plan §5.
+- New `DELETE /rbac-admin/roles/:id/permissions` + `detachPermissions` GraphQL mutation,
+  same `@Permissions('manage:User')` / guard order / thin delegation as `attach`.
+- The test that **encoded the bug** (`deletes a permission no system role grants`) was
+  replaced by tests pinning correct behaviour: a declared baseline permission granted by no
+  system role (`update:Post`) is NOT deletable; a runtime-created permission IS. Plus detach
+  idempotency, per-holder fan-out, and the pre-delete capture ordering. Verified by mutation
+  check — stubbing the `isSystem` guard to `false` fails exactly the two baseline tests.
+
+Gate after the fix: build 0; `pnpm test` **10 files / 77 passed**; `tsc --noEmit` 0; `oxlint`
+0; **boot re-verified** (`/graphql` mapped, "Nest application successfully started").
+
+Two caveats recorded: (a) the seed's `findOrCreatePermission` never updates an existing row,
+so any environment that already ran the old seed keeps `is_system = false` on those rows until
+they are recreated — the contract has no permission-update method to backfill with; (b)
+`deletePermission` does not fan out `invalidate()` (finding a permission's holders would need
+another contract method), so only the three methods in §5.5 do.
+
+Widening the interfaces broke every typed test double: `auth.service.spec.ts` and
+`jwt-stateless.auth-strategy.spec.ts` each needed a one-line stub for the new methods.
+Behaviour unchanged; without them the zero-error `tsc` gate is unmeetable.
 
 **Also confirmed as genuine contract gaps** (not skipped work — the agents were correctly
 blocked, not negligent):

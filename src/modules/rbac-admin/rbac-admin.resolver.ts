@@ -51,6 +51,14 @@ export class RbacAdminResolver {
     return this.rbacAdmin.attachPermissions(roleId, input);
   }
 
+  @Mutation(() => [RbacPermission])
+  detachPermissions(
+    @Args('roleId', { type: () => ID }) roleId: string,
+    @Args('input') input: AttachPermissionsDto,
+  ): Promise<Permission[]> {
+    return this.rbacAdmin.detachPermissions(roleId, input);
+  }
+
   @Mutation(() => Boolean)
   async deleteRole(@Args('roleId', { type: () => ID }) roleId: string): Promise<boolean> {
     await this.rbacAdmin.deleteRole(roleId);

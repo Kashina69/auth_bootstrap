@@ -48,6 +48,11 @@ export class RbacAdminController {
     return this.rbacAdmin.attachPermissions(id, dto);
   }
 
+  @Delete('roles/:id/permissions')
+  detachPermissions(@Param('id') id: string, @Body() dto: AttachPermissionsDto): Promise<Permission[]> {
+    return this.rbacAdmin.detachPermissions(id, dto);
+  }
+
   @Get('permissions')
   listPermissions(): Promise<Permission[]> {
     return this.rbacAdmin.listPermissions();

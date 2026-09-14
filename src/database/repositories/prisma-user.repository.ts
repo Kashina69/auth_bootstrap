@@ -55,6 +55,15 @@ export class PrismaUserRepository implements UserRepository {
     });
     return toAuthzContext(assignments);
   }
+
+  /** Ids only — the caller drops a cache entry per user, it never reads their fields. */
+  async findUserIdsByRole(roleId: string): Promise<string[]> {
+    const assignments = await this.prisma.userRole.findMany({
+      where: { roleId },
+      select: { userId: true },
+    });
+    return assignments.map((assignment) => assignment.userId);
+  }
 }
 
 function toUser(row: UserRow): User {

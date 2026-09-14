@@ -26,12 +26,18 @@ export class MongoosePermissionRepository implements PermissionRepository {
     return docs.map(toPermission);
   }
 
-  async create(data: { action: string; subject: string; description?: string }): Promise<Permission> {
+  async create(data: {
+    action: string;
+    subject: string;
+    description?: string;
+    isSystem?: boolean;
+  }): Promise<Permission> {
     const doc = await this.models.Permission.create({
       action: data.action,
       subject: data.subject,
       name: `${data.action}:${data.subject}`,
       description: data.description ?? null,
+      isSystem: data.isSystem ?? false,
     });
     return toPermission(doc.toObject());
   }
@@ -52,5 +58,6 @@ function toPermission(row: PermissionDocument): Permission {
     subject: row.subject,
     name: row.name,
     description: row.description,
+    isSystem: row.isSystem,
   };
 }

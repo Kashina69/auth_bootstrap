@@ -58,6 +58,14 @@ export class DrizzleUserRepository implements UserRepository {
       permissions: dedupe(rows.flatMap(toPermissionName)),
     };
   }
+
+  async findUserIdsByRole(roleId: string): Promise<string[]> {
+    const rows = await this.db
+      .select({ userId: userRoles.userId })
+      .from(userRoles)
+      .where(eq(userRoles.roleId, roleId));
+    return rows.map((row) => row.userId);
+  }
 }
 
 type GrantRow = {

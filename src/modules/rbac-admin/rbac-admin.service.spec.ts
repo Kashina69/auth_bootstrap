@@ -15,6 +15,7 @@ const MANAGE_USER: Permission = {
   subject: 'User',
   name: 'manage:User',
   description: null,
+  isSystem: true,
 };
 const READ_POST: Permission = {
   id: 'p-read-post',
@@ -22,20 +23,45 @@ const READ_POST: Permission = {
   subject: 'Post',
   name: 'read:Post',
   description: null,
+  isSystem: true,
 };
+// Declared by the seed's `permissions[]`, granted to no system role at all — the case the
+// "granted by an isSystem role" heuristic got wrong (plan.md §5.4, MEMORY.md F1).
+const UPDATE_POST: Permission = {
+  id: 'p-update-post',
+  action: 'update',
+  subject: 'Post',
+  name: 'update:Post',
+  description: null,
+  isSystem: true,
+};
+const RUNTIME_PERMISSION: Permission = {
+  id: 'p-read-invoice',
+  action: 'read',
+  subject: 'Invoice',
+  name: 'read:Invoice',
+  description: null,
+  isSystem: false,
+};
+
+const HOLDERS = ['u1', 'u2'];
 
 interface Calls {
   invalidated: string[];
   deletedRoles: string[];
   deletedPermissions: string[];
   attached: Array<{ roleId: string; permissionIds: string[] }>;
+  detached: Array<{ roleId: string; permissionIds: string[] }>;
   assigned: Array<{ userId: string; roleId: string }>;
+  events: string[]; // ordered, so `deleteRole` can be pinned to reading holders first
 }
 
 function createService(calls: Calls, roles: Role[] = [SYSTEM_ROLE, CUSTOM_ROLE]): RbacAdminService {
-  const permissions = [MANAGE_USER, READ_POST];
-  // `admin` is a system role, so everything it grants counts as baseline (plan.md §5.4).
-  const grants: Record<string, Permission[]> = { [SYSTEM_ROLE.id]: [MANAGE_USER] };
+  const permissions = [MANAGE_USER, READ_POST, UPDATE_POST, RUNTIME_PERMISSION];
+  const grants: Record<string, Permission[]> = {
+    [SYSTEM_ROLE.id]: [MANAGE_USER],
+    [CUSTOM_ROLE.id]: [READ_POST],
+  };
 
   const roleRepo: RoleRepository = {
     findById: async (id) => roles.find((role) => role.id === id) ?? null,
@@ -48,8 +74,15 @@ function createService(calls: Calls, roles: Role[] = [SYSTEM_ROLE, CUSTOM_ROLE])
       isSystem: data.isSystem ?? false,
     }),
     attachPermissions: async (roleId, permissionIds) => void calls.attached.push({ roleId, permissionIds }),
+    detachPermissions: async (roleId, permissionIds) => {
+      calls.detached.push({ roleId, permissionIds });
+      grants[roleId] = (grants[roleId] ?? []).filter((held) => !permissionIds.includes(held.id));
+    },
     listPermissions: async (roleId) => grants[roleId] ?? [],
-    delete: async (id) => void calls.deletedRoles.push(id),
+    delete: async (id) => {
+      calls.events.push('delete-role');
+      calls.deletedRoles.push(id);
+    },
   };
 
   const permissionRepo: PermissionRepository = {
@@ -62,6 +95,7 @@ function createService(calls: Calls, roles: Role[] = [SYSTEM_ROLE, CUSTOM_ROLE])
       subject: data.subject,
       name: `${data.action}:${data.subject}`,
       description: data.description ?? null,
+      isSystem: data.isSystem ?? false,
     }),
     delete: async (id) => void calls.deletedPermissions.push(id),
   };
@@ -69,6 +103,10 @@ function createService(calls: Calls, roles: Role[] = [SYSTEM_ROLE, CUSTOM_ROLE])
   const userRepo = {
     findById: async (id: string) => (id === 'u1' ? { id } : null),
     assignRole: async (userId: string, roleId: string) => void calls.assigned.push({ userId, roleId }),
+    findUserIdsByRole: async (roleId: string) => {
+      calls.events.push('read-holders');
+      return roleId === CUSTOM_ROLE.id ? HOLDERS : [];
+    },
   } as unknown as UserRepository;
   const authz: IAuthorizationProvider = {
     getContext: async () => ({ roles: [], permissions: [] }),
@@ -79,7 +117,15 @@ function createService(calls: Calls, roles: Role[] = [SYSTEM_ROLE, CUSTOM_ROLE])
 }
 
 function emptyCalls(): Calls {
-  return { invalidated: [], deletedRoles: [], deletedPermissions: [], attached: [], assigned: [] };
+  return {
+    invalidated: [],
+    deletedRoles: [],
+    deletedPermissions: [],
+    attached: [],
+    detached: [],
+    assigned: [],
+    events: [],
+  };
 }
 
 describe('RbacAdminService', () => {
@@ -99,28 +145,57 @@ describe('RbacAdminService', () => {
     expect(calls.deletedRoles).toEqual([]);
   });
 
-  it('deletes a custom role', async () => {
+  it('deletes a custom role, reading its holders before the relation is gone', async () => {
     const calls = emptyCalls();
     await createService(calls).deleteRole(CUSTOM_ROLE.id);
     expect(calls.deletedRoles).toEqual([CUSTOM_ROLE.id]);
+    expect(calls.events).toEqual(['read-holders', 'delete-role']);
+    expect(calls.invalidated).toEqual(HOLDERS);
   });
 
-  it('refuses to delete a permission a system role grants', async () => {
+  it('refuses to delete a permission the baseline grants a system role', async () => {
     const calls = emptyCalls();
     await expect(createService(calls).deletePermission(MANAGE_USER.id)).rejects.toThrow(ForbiddenException);
     expect(calls.deletedPermissions).toEqual([]);
   });
 
-  it('deletes a permission no system role grants', async () => {
+  it('refuses to delete a declared baseline permission no system role grants', async () => {
     const calls = emptyCalls();
-    await createService(calls).deletePermission(READ_POST.id);
-    expect(calls.deletedPermissions).toEqual([READ_POST.id]);
+    await expect(createService(calls).deletePermission(UPDATE_POST.id)).rejects.toThrow(ForbiddenException);
+    expect(calls.deletedPermissions).toEqual([]);
+  });
+
+  it('deletes a permission created at runtime', async () => {
+    const calls = emptyCalls();
+    await createService(calls).deletePermission(RUNTIME_PERMISSION.id);
+    expect(calls.deletedPermissions).toEqual([RUNTIME_PERMISSION.id]);
   });
 
   it('resolves "action:subject" names to ids when attaching', async () => {
     const calls = emptyCalls();
     await createService(calls).attachPermissions(CUSTOM_ROLE.id, { permissions: ['read:Post', 'read:Post'] });
     expect(calls.attached).toEqual([{ roleId: CUSTOM_ROLE.id, permissionIds: [READ_POST.id] }]);
+  });
+
+  it('invalidates every holder of the role it attached to', async () => {
+    const calls = emptyCalls();
+    await createService(calls).attachPermissions(CUSTOM_ROLE.id, { permissions: ['update:Post'] });
+    expect(calls.invalidated).toEqual(HOLDERS);
+  });
+
+  it('detaches a grant, invalidates its holders, and a repeated detach is a no-op', async () => {
+    const calls = emptyCalls();
+    const service = createService(calls);
+    const detach = () => service.detachPermissions(CUSTOM_ROLE.id, { permissions: ['read:Post'] });
+
+    await expect(detach()).resolves.toEqual([]);
+    await expect(detach()).resolves.toEqual([]);
+
+    expect(calls.detached).toEqual([
+      { roleId: CUSTOM_ROLE.id, permissionIds: [READ_POST.id] },
+      { roleId: CUSTOM_ROLE.id, permissionIds: [READ_POST.id] },
+    ]);
+    expect(calls.invalidated).toEqual([...HOLDERS, ...HOLDERS]);
   });
 
   it('reports every unknown permission name at once', async () => {

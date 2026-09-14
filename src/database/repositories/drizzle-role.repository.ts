@@ -1,4 +1,4 @@
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { DrizzleDb } from '../drizzle/client.js';
 import { permissions, rolePermissions, roles } from '../drizzle/schema.js';
 import type { Permission } from './permission.repository.js';
@@ -41,6 +41,13 @@ export class DrizzleRoleRepository implements RoleRepository {
       .onConflictDoNothing();
   }
 
+  async detachPermissions(roleId: string, permissionIds: string[]): Promise<void> {
+    if (permissionIds.length === 0) return;
+    await this.db
+      .delete(rolePermissions)
+      .where(and(eq(rolePermissions.roleId, roleId), inArray(rolePermissions.permissionId, permissionIds)));
+  }
+
   async listPermissions(roleId: string): Promise<Permission[]> {
     return this.db
       .select({
@@ -49,6 +56,7 @@ export class DrizzleRoleRepository implements RoleRepository {
         subject: permissions.subject,
         name: permissions.name,
         description: permissions.description,
+        isSystem: permissions.isSystem,
       })
       .from(rolePermissions)
       .innerJoin(permissions, eq(rolePermissions.permissionId, permissions.id))

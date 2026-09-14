@@ -42,6 +42,7 @@ type Mutation {
   createRole(input: CreateRoleDto!): RbacRole!
   deletePermission(permissionId: ID!): Boolean!
   deleteRole(roleId: ID!): Boolean!
+  detachPermissions(input: AttachPermissionsDto!, roleId: ID!): [RbacPermission!]!
   login(input: LoginDto!): AuthResultType!
   logout: Boolean!
   refresh(input: RefreshDto!): AuthResultType!
@@ -58,6 +59,7 @@ type RbacPermission {
   action: String!
   description: String
   id: ID!
+  isSystem: Boolean!
   name: String!
   subject: String!
 }

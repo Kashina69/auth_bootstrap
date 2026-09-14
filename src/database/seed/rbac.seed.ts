@@ -63,9 +63,27 @@ class SeedModule {}
 
 async function runSeed(permissions: PermissionRepository, roles: RoleRepository): Promise<void> {
   const baseline = loadBaseline();
-  const known = await upsertPermissions(permissions, baseline.permissions);
-  await upsertRoles(roles, permissions, baseline.roles, known);
+  const baselineNames = baselinePermissionNames(baseline);
+  const known = await upsertPermissions(permissions, baseline.permissions, baselineNames);
+  await upsertRoles(roles, permissions, baseline.roles, known, baselineNames);
   logger.log(`baseline ready: ${known.size} permissions, ${baseline.roles.length} roles`);
+}
+
+/**
+ * `is_system` marks what the runtime admin API may not delete (plan.md §5.4), so it is the
+ * union of the two things the JSON calls baseline: the declared `permissions[]` list, and
+ * every name a system role is granted. The second half matters because a role may grant a
+ * permission the list forgot to declare — `admin` and `manage:Post` — and a grant the
+ * baseline depends on is baseline in substance, not just in the list.
+ */
+function baselinePermissionNames(baseline: SeedFile): Set<string> {
+  const declared = baseline.permissions.map((permission) =>
+    permissionName(permission.action, permission.subject),
+  );
+  const grantedBySystemRoles = baseline.roles
+    .filter((role) => role.isSystem)
+    .flatMap((role) => role.permissions);
+  return new Set([...declared, ...grantedBySystemRoles]);
 }
 
 /**
@@ -75,9 +93,10 @@ async function runSeed(permissions: PermissionRepository, roles: RoleRepository)
 async function upsertPermissions(
   repo: PermissionRepository,
   seeds: SeedPermission[],
+  baseline: Set<string>,
 ): Promise<Map<string, Permission>> {
   const known = new Map<string, Permission>();
-  for (const seed of seeds) await rememberPermission(repo, known, seed.action, seed.subject);
+  for (const seed of seeds) await rememberPermission(repo, known, seed.action, seed.subject, baseline);
   return known;
 }
 
@@ -85,9 +104,10 @@ async function findOrCreatePermission(
   repo: PermissionRepository,
   action: string,
   subject: string,
+  isSystem: boolean,
 ): Promise<Permission> {
   const existing = await repo.findByName(permissionName(action, subject));
-  return existing ?? repo.create({ action, subject });
+  return existing ?? repo.create({ action, subject, isSystem });
 }
 
 async function rememberPermission(
@@ -95,12 +115,13 @@ async function rememberPermission(
   known: Map<string, Permission>,
   action: string,
   subject: string,
+  baseline: Set<string>,
 ): Promise<Permission> {
   const name = permissionName(action, subject);
   const already = known.get(name);
   if (already !== undefined) return already;
 
-  const permission = await findOrCreatePermission(repo, action, subject);
+  const permission = await findOrCreatePermission(repo, action, subject, baseline.has(name));
   known.set(name, permission);
   return permission;
 }
@@ -110,10 +131,11 @@ async function upsertRoles(
   permissions: PermissionRepository,
   seeds: SeedRole[],
   known: Map<string, Permission>,
+  baseline: Set<string>,
 ): Promise<void> {
   for (const seed of seeds) {
     const role = await findOrCreateRole(roles, seed);
-    const grants = await resolveGrantIds(permissions, known, seed.permissions);
+    const grants = await resolveGrantIds(permissions, known, seed.permissions, baseline);
     await roles.attachPermissions(role.id, grants);
   }
 }
@@ -127,9 +149,10 @@ async function resolveGrantIds(
   repo: PermissionRepository,
   known: Map<string, Permission>,
   names: string[],
+  baseline: Set<string>,
 ): Promise<string[]> {
   const ids: string[] = [];
-  for (const name of names) ids.push((await resolveGrant(repo, known, name)).id);
+  for (const name of names) ids.push((await resolveGrant(repo, known, name, baseline)).id);
   return ids;
 }
 
@@ -143,6 +166,7 @@ async function resolveGrant(
   repo: PermissionRepository,
   known: Map<string, Permission>,
   name: string,
+  baseline: Set<string>,
 ): Promise<Permission> {
   const declared = known.get(name);
   if (declared !== undefined) return declared;
@@ -151,7 +175,7 @@ async function resolveGrant(
   if (separator === -1) {
     throw new Error(`Role references "${name}", which is not an "action:subject" permission`);
   }
-  return rememberPermission(repo, known, name.slice(0, separator), name.slice(separator + 1));
+  return rememberPermission(repo, known, name.slice(0, separator), name.slice(separator + 1), baseline);
 }
 
 function permissionName(action: string, subject: string): string {

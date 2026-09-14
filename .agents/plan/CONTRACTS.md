@@ -102,6 +102,7 @@ export interface UserRepository {
   updatePassword(id: string, passwordHash: string): Promise<void>;
   assignRole(userId: string, roleId: string): Promise<void>; // idempotent
   findRolesAndPermissions(id: string): Promise<{ roles: string[]; permissions: string[] }>;
+  findUserIdsByRole(roleId: string): Promise<string[]>; // holders of a role — plan §5.5 invalidate() fan-out
 }
 
 export interface RoleRepository {
@@ -110,6 +111,7 @@ export interface RoleRepository {
   findAll(): Promise<Role[]>;
   create(data: { name: string; description?: string; isSystem?: boolean }): Promise<Role>;
   attachPermissions(roleId: string, permissionIds: string[]): Promise<void>;
+  detachPermissions(roleId: string, permissionIds: string[]): Promise<void>; // idempotent
   listPermissions(roleId: string): Promise<Permission[]>;
   delete(id: string): Promise<void>;
 }
@@ -118,7 +120,7 @@ export interface PermissionRepository {
   findById(id: string): Promise<Permission | null>;
   findByName(name: string): Promise<Permission | null>;
   findAll(): Promise<Permission[]>;
-  create(data: { action: string; subject: string; description?: string }): Promise<Permission>;
+  create(data: { action: string; subject: string; description?: string; isSystem?: boolean }): Promise<Permission>;
   delete(id: string): Promise<void>;
 }
 
@@ -158,6 +160,7 @@ export interface Permission {
   subject: string;
   name: string; // generated "{action}:{subject}"
   description: string | null;
+  isSystem: boolean; // maps the existing is_system column — baseline permissions are undeletable
 }
 
 export interface RefreshTokenCreate {
@@ -312,3 +315,6 @@ the default Redis-free env).
 | 2026-09-11 | Added `UserRepository` to `JwtStatelessAuthStrategy` constructor (was too thin: `refresh()` could not rebuild email/flags/RBAC claims). `refresh()` now re-resolves identity + claims fresh from the DB | orchestrator |
 | 2026-09-11 | Added `assignRole(userId, roleId)` to `UserRepository` (register flow needs to assign the default role; no method existed) — idempotent across all four adapters | orchestrator |
 | 2026-09-11 | Added §10 — frozen strategy constructor signatures + factory `inject` arrays | strategy-interfaces-agent |
+| 2026-09-14 | `Permission` gains `isSystem`; `PermissionRepository.create` accepts optional `isSystem`. The `is_system` column already existed (migration line 22, `schema.prisma`, `drizzle/schema.ts`) but was not in the entity shape, so adapters dropped it — which let baseline permissions be deleted via the admin API. No migration needed | orchestrator |
+| 2026-09-14 | Added `UserRepository.findUserIdsByRole(roleId)` — plan §5.5's `invalidate()` fan-out for role-scoped mutations was unimplementable without a users-of-a-role lookup | orchestrator |
+| 2026-09-14 | Added `RoleRepository.detachPermissions(roleId, permissionIds)` — Phase 9 specifies CRUD but the contract had no way to remove a grant (`attachPermissions` is strictly additive) | orchestrator |

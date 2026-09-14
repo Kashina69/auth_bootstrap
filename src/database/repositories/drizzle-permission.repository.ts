@@ -20,7 +20,12 @@ export class DrizzlePermissionRepository implements PermissionRepository {
     return this.db.select().from(permissions).orderBy(asc(permissions.name));
   }
 
-  async create(data: { action: string; subject: string; description?: string }): Promise<Permission> {
+  async create(data: {
+    action: string;
+    subject: string;
+    description?: string;
+    isSystem?: boolean;
+  }): Promise<Permission> {
     const [row] = await this.db
       .insert(permissions)
       .values({
@@ -28,6 +33,7 @@ export class DrizzlePermissionRepository implements PermissionRepository {
         subject: data.subject,
         name: `${data.action}:${data.subject}`,
         description: data.description ?? null,
+        isSystem: data.isSystem ?? false,
       })
       .returning();
     return row;

@@ -43,6 +43,13 @@ export class SequelizeRoleRepository implements RoleRepository {
     );
   }
 
+  async detachPermissions(roleId: string, permissionIds: string[]): Promise<void> {
+    if (permissionIds.length === 0) return;
+    await RolePermissionModel.destroy({
+      where: { roleId, permissionId: { [Op.in]: permissionIds } },
+    });
+  }
+
   async listPermissions(roleId: string): Promise<Permission[]> {
     const links = await RolePermissionModel.findAll({ where: { roleId } });
     const permissionIds = links.map((link) => link.permissionId);
@@ -75,5 +82,6 @@ function toPermission(row: PermissionModel): Permission {
     subject: row.subject,
     name: row.name,
     description: row.description,
+    isSystem: row.isSystem,
   };
 }

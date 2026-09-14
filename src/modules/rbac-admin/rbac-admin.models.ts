@@ -38,4 +38,7 @@ export class RbacPermission {
 
   @Field(() => String, { nullable: true })
   description: string | null;
+
+  @Field()
+  isSystem: boolean;
 }

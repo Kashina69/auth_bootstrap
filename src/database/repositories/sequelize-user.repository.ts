@@ -68,6 +68,11 @@ export class SequelizeUserRepository implements UserRepository {
       permissions: dedupe(permissions.map((permission) => `${permission.action}:${permission.subject}`)),
     };
   }
+
+  async findUserIdsByRole(roleId: string): Promise<string[]> {
+    const assignments = await UserRoleModel.findAll({ where: { roleId } });
+    return assignments.map((assignment) => assignment.userId);
+  }
 }
 
 function toUser(row: UserModel): User {

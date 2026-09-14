@@ -51,24 +51,27 @@ export class RbacAdminService {
   async attachPermissions(roleId: string, dto: AttachPermissionsDto): Promise<Permission[]> {
     await this.requireRole(roleId);
     await this.roles.attachPermissions(roleId, await this.resolvePermissionIds(dto.permissions));
-    // plan.md §5.5 also wants the db-live cache of every role holder dropped here (and after
-    // `deleteRole`). Holders are not enumerable through the tokens this module may use:
-    // CONTRACTS.md §5 has no users-of-a-role lookup and §9 forbids reaching past the
-    // repository contracts for one. The write is correct, but its visibility is bounded by
-    // the db-live cache TTL until the contract gains that lookup — reported, not guessed around.
+    await this.invalidateRoleHolders(roleId);
+    return this.roles.listPermissions(roleId);
+  }
+
+  async detachPermissions(roleId: string, dto: AttachPermissionsDto): Promise<Permission[]> {
+    await this.requireRole(roleId);
+    await this.roles.detachPermissions(roleId, await this.resolvePermissionIds(dto.permissions));
+    await this.invalidateRoleHolders(roleId);
     return this.roles.listPermissions(roleId);
   }
 
   async deleteRole(roleId: string): Promise<void> {
     assertRoleIsRemovable(await this.requireRole(roleId));
-    await this.roles.delete(roleId); // holder fan-out gap — see `attachPermissions`
+    // Read the holders before the delete: afterwards the relation that names them is gone.
+    const holders = await this.users.findUserIdsByRole(roleId);
+    await this.roles.delete(roleId);
+    await this.invalidateAll(holders);
   }
 
   async deletePermission(permissionId: string): Promise<void> {
-    const permission = await this.requirePermission(permissionId);
-    if (await isBaselinePermission(this.roles, permission.id)) {
-      throw new ForbiddenException(`Permission "${permission.name}" is part of the seeded baseline`);
-    }
+    assertPermissionIsRemovable(await this.requirePermission(permissionId));
     await this.permissions.delete(permissionId);
   }
 
@@ -113,6 +116,18 @@ export class RbacAdminService {
   private async requireUser(userId: string): Promise<void> {
     if ((await this.users.findById(userId)) === null) throw new NotFoundException(`No user with id "${userId}"`);
   }
+
+  /**
+   * plan.md §5.5: under `db-live` the next request would otherwise be answered from a cache
+   * entry holding the pre-mutation grants until its TTL expires.
+   */
+  private async invalidateRoleHolders(roleId: string): Promise<void> {
+    await this.invalidateAll(await this.users.findUserIdsByRole(roleId));
+  }
+
+  private async invalidateAll(userIds: string[]): Promise<void> {
+    for (const userId of userIds) await this.authz.invalidate(userId);
+  }
 }
 
 /** plan.md §5.4 — the soft guard that keeps `superadmin`/`admin`/`user` from being deleted. */
@@ -120,14 +135,9 @@ function assertRoleIsRemovable(role: Role): void {
   if (role.isSystem) throw new ForbiddenException(`Role "${role.name}" is a seeded system role`);
 }
 
-/**
- * Plan §5.4 protects the seeded permissions too, but `Permission` carries no `isSystem` flag
- * (CONTRACTS.md §5). The baseline is exactly what the seeded system roles grant, so that
- * grant — not a column — is what makes a permission undeletable. A permission granted to no
- * system role is one an operator created at runtime and may remove again.
- */
-async function isBaselinePermission(roles: RoleRepository, permissionId: string): Promise<boolean> {
-  const systemRoles = (await roles.findAll()).filter((role) => role.isSystem);
-  const grants = await Promise.all(systemRoles.map((role) => roles.listPermissions(role.id)));
-  return grants.some((granted) => granted.some((permission) => permission.id === permissionId));
+/** plan.md §5.4 — the same guard for the baseline permissions the seed marks `isSystem`. */
+function assertPermissionIsRemovable(permission: Permission): void {
+  if (permission.isSystem) {
+    throw new ForbiddenException(`Permission "${permission.name}" is part of the seeded baseline`);
+  }
 }
