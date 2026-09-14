@@ -2,15 +2,17 @@
 
 Drop-in, DB-backed, ORM-agnostic authentication + RBAC module for NestJS 12 (Fastify).
 
-## Current state + how to resume (waves 1–4 of 8 done; re-verified 2026-09-14)
+## Current state + how to resume (waves 1–5 of 8 done; verified 2026-09-14)
 
 **To resume:** read `.agents/plan/MEMORY.md` (running build log + latest checkpoint) first,
-then dispatch Wave 5's agents as subagents per `plan.agent.md` §3 — each given `STYLE.md`
+then dispatch Wave 6's agents as subagents per `plan.agent.md` §3 — each given `STYLE.md`
 plus the relevant `CONTRACTS.md`/`plan.md` slice, restricted to its owned paths, with the
 frozen signatures in `CONTRACTS.md` §10 unchanged. Run the per-wave conformance check
 (`pnpm build` + `pnpm test` green, owned paths respected) before dispatching the wave after.
 No `src/` scanning is needed to pick this up — these docs are the source of truth.
 
+**Gate at this checkpoint:** `pnpm build` exit 0 · `pnpm test` 9 files / 64 tests passed ·
+`pnpm exec tsc --noEmit` clean · `pnpm exec oxlint src/ test/` clean.
 
 The build is driven by a multi-agent plan under `.agents/plan/`:
 
@@ -21,7 +23,7 @@ The build is driven by a multi-agent plan under `.agents/plan/`:
 - `STYLE.md` — the binding code-style contract
 - `MEMORY.md` — the running build log + decisions + latest checkpoint
 
-### What exists (verified green: `pnpm build` exit 0, 48 tests pass)
+### What exists
 
 - `src/config/` — zod-validated env (`AUTH_STRATEGY`, `RBAC_STRATEGY`, `DB_PROVIDER`), fail-fast boot.
 - `src/common/` — DI tokens, exception filter, redacting/logging + transform + timeout interceptors.
@@ -29,16 +31,18 @@ The build is driven by a multi-agent plan under `.agents/plan/`:
 - `src/rbac-core/` — framework-agnostic `can()`/`hasRole()`/`hasAnyPermission()` (zero deps).
 - `src/auth-strategies/` — `jwt-stateless` (JWT + rotating refresh token w/ reuse detection) and `session-redis` (Redis session + cookie).
 - `src/rbac-strategies/` — `embedded-claims` (baked claims) and `db-live` (live lookup + 5s cache).
+- `src/common/decorators/` + `src/common/guards/` — `@Public`/`@Roles`/`@Permissions`/`@CurrentUser`, `AuthGuard` (REST + GraphQL) and `RbacGuard` (deny-by-default).
+- `src/common/security/` — `PasswordService` (argon2id, spec §1 params).
+- `src/modules/auth/` — `AuthService` + DTOs + REST controller (`POST /auth/register|login|refresh` public, `POST /auth/logout` guarded), wired into `src/app.module.ts`.
 
 ### What's left
 
-- **Wave 5** — `guards-decorators-agent` (`@Public`/`@Roles`/`@Permissions`/`@CurrentUser` + `AuthGuard`/`RbacGuard`) then `auth-api-agent` (`modules/auth/` REST controller + `AuthService` + `PasswordService`).
-- **Wave 6** — `rbac-admin-api-agent` (runtime role/permission CRUD + seed) ∥ `graphql-parity-agent`.
-- **Wave 7** — `security-hardening-agent` (helmet/CORS/CSRF/throttler/lockout).
+- **Wave 6** — `rbac-admin-api-agent` (runtime role/permission CRUD + seed) ∥ `graphql-parity-agent` (resolvers mirroring REST; makes the already-written GraphQL branch in the guards live).
+- **Wave 7** — `security-hardening-agent` (helmet/CORS/CSRF, per-route throttler, brute-force lockout — the `@Throttle()` metadata already on the auth routes is inert until this lands).
 - **Wave 8** — `frontend-kit-agent` ∥ `test-agent` (unit + e2e).
 
-## How to resume
+### Known open items (full detail in `MEMORY.md`)
 
-1. Read `.agents/plan/MEMORY.md` (checkpoint + decisions) and `CONTRACTS.md` (§10 has the frozen constructor signatures).
-2. Dispatch the next wave's agents as subagents, each given `STYLE.md` + the relevant `CONTRACTS`/`plan.md` slice, respecting owned-paths only and frozen signatures.
-3. Run a per-wave conformance check (`pnpm build` + `pnpm test` green, owned paths respected) before the following wave.
+- **`logout` silently no-ops under `session-redis`** and **the session cookie is never attached** — both are contract-level gaps needing a decision above the controller, and both are inert under the default `jwt-stateless` + `embedded-claims` pairing. Security-relevant; do not ship `session-redis` without resolving them.
+- **No `auth.guard.spec.ts`** — `AuthGuard`'s `@Public()` bypass and its `req.user = user` assignment are untested (Wave 8 closes this).
+- `@Roles`/`ROLES_KEY` is deliberately kept but enforced by nothing; authorization runs through `@Permissions()` + `can()`.

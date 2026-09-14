@@ -84,6 +84,7 @@ function createFakeUserRepository(): UserRepository {
     findByEmail: () => Promise.resolve(null),
     create: () => Promise.resolve({} as never),
     updatePassword: () => Promise.resolve(),
+    assignRole: () => Promise.resolve(),
     findRolesAndPermissions: () =>
       Promise.resolve({ roles: USER.roles ?? [], permissions: USER.permissions ?? [] }),
   };
@@ -210,7 +211,7 @@ describe('JwtStatelessAuthStrategy', () => {
     it('signs and verifies with the configured key pair', async () => {
       const strategy = new JwtStatelessAuthStrategy(createFakeRepository(), createFakeUserRepository(), jwt, rsaConfig);
       const result = await strategy.login(USER, META);
-      expect(await validate(strategy, result.accessToken)).toEqual(USER);
+      expect(await validate(strategy, result.accessToken!)).toEqual(USER);
     });
 
     it('rejects an HS256 token signed with the public key as the HMAC secret', async () => {
