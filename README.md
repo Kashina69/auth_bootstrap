@@ -2,7 +2,7 @@
 
 Drop-in, DB-backed, ORM-agnostic authentication + RBAC module for NestJS 12 (Fastify).
 
-## Current state + how to resume (waves 1–5 of 8 done; verified 2026-09-14)
+## Current state + how to resume (waves 1–6 of 8 done; verified 2026-09-14)
 
 **To resume:** read `.agents/plan/MEMORY.md` (running build log + latest checkpoint) first,
 then dispatch Wave 6's agents as subagents per `plan.agent.md` §3 — each given `STYLE.md`
@@ -11,8 +11,9 @@ frozen signatures in `CONTRACTS.md` §10 unchanged. Run the per-wave conformance
 (`pnpm build` + `pnpm test` green, owned paths respected) before dispatching the wave after.
 No `src/` scanning is needed to pick this up — these docs are the source of truth.
 
-**Gate at this checkpoint:** `pnpm build` exit 0 · `pnpm test` 9 files / 64 tests passed ·
-`pnpm exec tsc --noEmit` clean · `pnpm exec oxlint src/ test/` clean.
+**Gate at this checkpoint:** `pnpm build` exit 0 · `pnpm test` 10 files / 74 tests passed ·
+`pnpm exec tsc --noEmit` clean · `pnpm exec oxlint src/ test/` clean · **app boots** (GraphQL
+on Fastify + all 12 REST routes mapped).
 
 The build is driven by a multi-agent plan under `.agents/plan/`:
 
@@ -37,12 +38,15 @@ The build is driven by a multi-agent plan under `.agents/plan/`:
 
 ### What's left
 
-- **Wave 6** — `rbac-admin-api-agent` (runtime role/permission CRUD + seed) ∥ `graphql-parity-agent` (resolvers mirroring REST; makes the already-written GraphQL branch in the guards live).
-- **Wave 7** — `security-hardening-agent` (helmet/CORS/CSRF, per-route throttler, brute-force lockout — the `@Throttle()` metadata already on the auth routes is inert until this lands).
+- **Wave 7** — `security-hardening-agent` (helmet/CORS/CSRF, per-route throttler, brute-force lockout, GraphQL depth/complexity limits — the `@Throttle()` metadata already on the auth routes is inert until this lands).
 - **Wave 8** — `frontend-kit-agent` ∥ `test-agent` (unit + e2e).
 
 ### Known open items (full detail in `MEMORY.md`)
 
-- **`logout` silently no-ops under `session-redis`** and **the session cookie is never attached** — both are contract-level gaps needing a decision above the controller, and both are inert under the default `jwt-stateless` + `embedded-claims` pairing. Security-relevant; do not ship `session-redis` without resolving them.
+- **DEFECT: `isSystem` permissions are deletable.** The service derives "baseline" from system-role grants, but plan §5 declares 7 baseline permissions while system roles grant only 5 — so `update:Post`, `delete:Post`, `read:User` can be deleted via `DELETE /rbac-admin/permissions/:id`. The DB column `is_system` already exists; CONTRACTS §5 just doesn't expose it on `Permission`. Fix is surfacing the column, not a migration.
+- **Contract gaps (agents were correctly blocked, not negligent):** no users-of-a-role lookup, so plan §5.5's `invalidate()` fan-out is impossible for role-scoped mutations; and no detach-permission, so Phase 9's "CRUD" is incomplete for grants.
+- **`logout` silently no-ops under `session-redis`** and **the session cookie is never attached** — both contract-level gaps, both inert under the default `jwt-stateless` + `embedded-claims` pairing. Security-relevant; do not ship `session-redis` without resolving them.
 - **No `auth.guard.spec.ts`** — `AuthGuard`'s `@Public()` bypass and its `req.user = user` assignment are untested (Wave 8 closes this).
+- **`@nestjs/throttler@6.5.0` declares peers for Nest `^7–^11`** but this project is Nest 12 — Wave 7 will likely need to upgrade it before `ThrottlerGuard` can be registered.
+- **`autoSchemaFile` writes `src/schema.gql`** on every boot, requiring a writable `src/` in production.
 - `@Roles`/`ROLES_KEY` is deliberately kept but enforced by nothing; authorization runs through `@Permissions()` + `can()`.

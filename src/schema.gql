@@ -1,0 +1,79 @@
+# ------------------------------------------------------
+# THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+# ------------------------------------------------------
+
+input AssignRoleDto {
+  roleId: ID!
+}
+
+input AttachPermissionsDto {
+  permissions: [String!]!
+}
+
+type AuthResultType {
+  accessToken: String
+  expiresAt: String!
+  refreshToken: String
+  user: AuthenticatedUserType!
+}
+
+type AuthenticatedUserType {
+  email: String!
+  id: String!
+  isActive: Boolean!
+  isEmailVerified: Boolean!
+  permissions: [String!]
+  roles: [String!]
+}
+
+input CreateRoleDto {
+  description: String
+  name: String!
+}
+
+input LoginDto {
+  email: String!
+  password: String!
+}
+
+type Mutation {
+  assignRole(input: AssignRoleDto!, userId: ID!): Boolean!
+  attachPermissions(input: AttachPermissionsDto!, roleId: ID!): [RbacPermission!]!
+  createRole(input: CreateRoleDto!): RbacRole!
+  deletePermission(permissionId: ID!): Boolean!
+  deleteRole(roleId: ID!): Boolean!
+  login(input: LoginDto!): AuthResultType!
+  logout: Boolean!
+  refresh(input: RefreshDto!): AuthResultType!
+  register(input: RegisterDto!): AuthResultType!
+}
+
+type Query {
+  permissions: [RbacPermission!]!
+  rolePermissions(roleId: ID!): [RbacPermission!]!
+  roles: [RbacRole!]!
+}
+
+type RbacPermission {
+  action: String!
+  description: String
+  id: ID!
+  name: String!
+  subject: String!
+}
+
+type RbacRole {
+  description: String
+  id: ID!
+  isSystem: Boolean!
+  name: String!
+}
+
+input RefreshDto {
+  refreshToken: String!
+}
+
+input RegisterDto {
+  email: String!
+  password: String!
+}

@@ -25,7 +25,7 @@ Updated by the orchestrator after each wave (never by workers — avoids write r
 | 3 | strategy-interfaces-agent | ✅ done (2026-09-11) |
 | 4 | auth-jwt-agent ∥ auth-session-agent ∥ rbac-embedded-agent ∥ rbac-dblive-agent | ✅ done (2026-09-11) |
 | 5 | guards-decorators-agent ∥ auth-service-agent ∥ auth-http-agent → integration-agent | ✅ done (2026-09-14) |
-| 6 | rbac-admin-api-agent ∥ graphql-parity-agent | pending |
+| 6 | rbac-admin-agent ∥ graphql-parity-agent → wave6-verifier | ✅ done (2026-09-14) |
 | 7 | security-hardening-agent | pending |
 | 8 | frontend-kit-agent ∥ test-agent | pending |
 
@@ -247,3 +247,75 @@ Open items / risks (Wave 5 additions first):
 Carried forward from Wave 4 (still open): Prisma migration path; `DB_PROVIDER=mongoose`
 reuses `DATABASE_URL`; Mongoose ObjectIds vs UUID strings; `rbac-core` `hasRole`/
 `hasAnyPermission` have no null-guard; Redis/Postgres live paths untested.
+
+### Wave 6 decisions (orchestrator, 2026-09-14)
+
+Dispatched as **2 concurrent agents** (down from Wave 5's 3 build + 1 integration + 1
+verifier), per the cost directive. Each agent owns a whole vertical, so neither depends on
+the other. **`app.module.ts` / `auth.module.ts` wiring was done by the orchestrator**, not an
+agent — it is 3 lines and cost 47k as an agent in Wave 5.
+
+- **GraphQL driver: Apollo (code-first)** per plan.md §10 + line 33 and §11 Phase 10.
+  Installed `@nestjs/apollo@14.0.0`, `@apollo/server@5.5.1`, `@as-integrations/fastify@3.1.0`.
+- **graphql pinned 17.0.2 → 16.14.2.** `@apollo/server@5.5.1` peer-requires `graphql@^16.11.0`
+  while `@nestjs/graphql` accepts `^16.11.0 || ^17.0.0`; 16.x is the only version satisfying
+  both. The Wave 5 install of graphql 17 had to be walked back.
+- **`@as-integrations/fastify` is mandatory, not optional** — `@nestjs/apollo`'s Fastify path
+  calls `loadPackage('@as-integrations/fastify')` at driver start; without it `GraphQLModule`
+  throws at boot. `@apollo/protobufjs`'s build script is a version nag, so it is set `false`
+  in `pnpm-workspace.yaml`.
+- **GraphQL depth/complexity limiting deferred to Wave 7** (plan.md line 359). Not hand-rolled.
+- **`tsx` added as a devDep** for `seed:rbac` — `node --experimental-strip-types` cannot
+  resolve this project's `.js`→`.ts` ESM specifiers (reproduced by the verifier).
+- **`autoSchemaFile` points at `src/schema.gql`** — the app writes into the source tree on
+  every boot, which requires a writable `src/` in production. Noted, not yet changed.
+
+### Checkpoint — end of Wave 6 (2026-09-14)
+
+Gate (orchestrator, after wiring): `pnpm build` exit **0**; `pnpm test` exit **0**,
+**10 files / 74 tests passed**; `pnpm exec tsc --noEmit` exit **0**; `pnpm exec oxlint src/ test/`
+exit **0**. **Boot verified for the first time** — a real `node dist/main.js` run mapped
+`/graphql` (POST), 4 `/auth/*` routes and 8 `/rbac-admin/*` routes, and logged
+"Nest application successfully started". This closes the Wave 5 open item where the guards'
+GraphQL branch was unreachable dead code.
+
+`AuthModule` now also provides `AuthResolver`; `GraphqlModule` + `RbacAdminModule` are wired
+into `src/app.module.ts`.
+
+### DEFECT found by the Wave 6 verifier — `isSystem` permissions are deletable
+
+**F1 (real defect, open).** `rbac-admin.service.ts` derives "baseline permission" as *"granted
+by some `isSystem` role"*. That heuristic is unsound against plan §5's own seed JSON: it
+declares 7 baseline permissions but the system roles grant only 5, so **`update:Post`,
+`delete:Post` and `read:User` are declared baseline yet deletable** — directly violating
+plan §5.4 ("`is_system = true` roles/permissions from the JSON are protected from deletion").
+The service comment asserting "the baseline is exactly what the seeded system roles grant" is
+false, and `rbac-admin.service.spec.ts` encodes the flawed behaviour as a passing test.
+
+Corollary: attaching a runtime-created permission to a system role makes it permanently
+undeletable, because no detach method exists to undo the grant.
+
+**Root cause is a half-wired column, not a missing feature:** the DB already has
+`is_system BOOLEAN NOT NULL DEFAULT false` (migration line 22, `schema.prisma:43`,
+`drizzle/schema.ts:21`) — but the `Permission` interface in CONTRACTS §5 does not expose it,
+so the repositories drop it and the service had nothing to read. The fix is to surface an
+already-existing column, not a migration.
+
+**Also confirmed as genuine contract gaps** (not skipped work — the agents were correctly
+blocked, not negligent):
+- **No users-of-a-role lookup** in CONTRACTS §5, so plan §5.5's `invalidate()` fan-out is
+  impossible for `attachPermissions`/`deleteRole`. Fix: add e.g.
+  `UserRepository.findUserIdsByRole(roleId)` (+4 adapters).
+- **No detach-permission** in `RoleRepository` — `attachPermissions` is strictly additive, so
+  Phase 9's "CRUD" is incomplete at the contract level. Interacts with F1 as above.
+
+**Verifier nitpicks (minor, not defects):** `requestMeta` and the three rate-limit constants
+are copy-pasted between `auth.controller.ts` and `auth.resolver.ts`; plan §5's JSON is
+internally inconsistent in the other direction too (`admin` grants `manage:Post`, which
+`permissions[]` never declares).
+
+**Cost note (honest):** the diff-scoped verifier cost **59.8k vs Wave 5's 68k full-tree** —
+a smaller saving than intended, because Wave 6's diff *is* most of the new code, so scoping
+to the diff still meant reading nearly everything. `rbac-admin-agent` cost 118.9k, roughly
+double the per-agent average, being a whole vertical. Wave 6 agent total ≈ 235k vs Wave 5's
+292k.
