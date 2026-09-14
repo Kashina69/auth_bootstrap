@@ -26,6 +26,11 @@ type AuthenticatedUserType {
   roles: [String!]
 }
 
+input CheckPermissionDto {
+  action: String!
+  subject: String!
+}
+
 input CreateRoleDto {
   description: String
   name: String!
@@ -49,7 +54,13 @@ type Mutation {
   register(input: RegisterDto!): AuthResultType!
 }
 
+type PermissionCheckResultType {
+  allowed: Boolean!
+}
+
 type Query {
+  checkPermission(input: CheckPermissionDto!): PermissionCheckResultType!
+  me: AuthenticatedUserType!
   permissions: [RbacPermission!]!
   rolePermissions(roleId: ID!): [RbacPermission!]!
   roles: [RbacRole!]!

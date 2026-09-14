@@ -248,3 +248,112 @@ oxlint 0 · boot verified.
 
 Prisma migration path (now two migrations); `DB_PROVIDER=mongoose` reuses `DATABASE_URL`;
 Mongoose ObjectIds vs UUID strings; Redis/Postgres live paths untested.
+
+---
+
+## Wave 8 — frontend kit + tests ✅ (2026-09-14) — CLOSING WAVE
+
+Model: **no agents at all.** The orchestrator built this wave inline. Every interface it needed
+was already frozen, so there was nothing to explore and nothing to parallelize; dispensing with
+agents removed the per-agent orientation tax entirely (Waves 5–7 spent 292k / 353k / 339k).
+
+| Agent | Task | Tokens |
+|---|---|---|
+| — | *(none dispatched)* | 0 |
+
+**Gate (orchestrator):** build **0** · `pnpm test` **17 files / 142 passed** (was 13/94) ·
+`pnpm test:e2e` **1 file / 42 passed** (was: no runnable e2e) · `tsc --noEmit` **0** ·
+`oxlint src/ test/` **0** · boots · live probes: `GET /auth/me` → 401 and
+`POST /authz/check` → 401 unauthenticated, both routes mapped.
+
+**Delivered (plan.md §11 Phases 12 + 13):**
+
+- `GET /auth/me` + GraphQL `me` — identity with roles/permissions resolved through
+  `IAuthorizationProvider.getContext()` (a claim-reading version would return nothing under
+  `db-live`).
+- `POST /authz/check` + GraphQL `checkPermission` — `{action, subject}` → `{allowed}`, from the
+  same `can()` `RbacGuard` uses. Guarded, but deliberately **no `@Permissions()`** (asking about
+  your own grants is not a privileged action).
+- `AuthzService` owning both; `AuthService`'s frozen Wave 5 surface untouched.
+- Client: `usePermission(action, subject)` + `authApi.me()` / `authzApi.check()`.
+- `test/auth.e2e-spec.ts` — **one spec file, run twice, once per `AUTH_STRATEGY`** (Phase 13's
+  requirement). Real `AppModule`; only the persistence boundary is replaced (in-memory repos in
+  `test/support/`), because no live Postgres or Redis exists here.
+
+**Defects found and fixed:**
+
+- **S1 (High) FIXED.** `SessionRedisAuthStrategy.logout` resolves its own session id from either
+  shape the frozen `logout(userId, sessionRef: unknown)` permits — the opaque id, or the platform
+  request the controller passes. Placed in the strategy, per Wave 5's prescription; contained in
+  the `session-redis/` folder so the deletable-folder property holds. Regression-tested.
+- **`test/app.e2e-spec.ts` DELETED — it was unrunnable.** The Nest generator stub booted
+  `AppModule` with `createNestApplication()` (the default **Express** adapter), so the Apollo
+  driver called `loadPackage('@as-integrations/express5')` and killed the process with
+  `process.exit(1)` before any assertion ran. It could never have passed in a Fastify-only app,
+  and it only asserted the generator's own `Hello World!`.
+
+**Finding corrected — the recorded S13 hypothesis was wrong:**
+
+WAVE-LOG previously guessed the cause was "the DTO is registered as an object type rather than an
+input type". It is not: `src/schema.gql` correctly declares `input LoginDto` and
+`login(input: LoginDto!)`. Measured against a live `node dist/main.js`:
+
+| Probe | Result |
+|---|---|
+| `query($a: String!){__typename}` **with** `variables:{"a":"x"}` | `Variable "$a" of required type "String!" was not provided` |
+| The **identical query with no `variables` key at all** | **byte-identical error** |
+| Declaring a variable and never using it | `Variable "$a" is never used` — validation *does* run |
+
+So `query` reaches Apollo and **`variables` never does**; the schema is not implicated. S13 is
+still **OPEN** but now precisely characterized. Cheapest next step: a temporary probe that logs
+the body as Apollo receives it — `cp` the file to a scratch path first (`orchestrate-skill.md`
+§9b), never `git checkout --`.
+
+**Incidental:** `@nestjs/throttler` does not re-export `ThrottlerStorageRecord` from its entry
+point (`index.d.ts` omits it); the test double restates the shape, which satisfies the structural
+`ThrottlerStorage` interface. `pnpm test:e2e` did not previously run anything meaningful — its
+only file was the unrunnable stub above.
+
+**New open items:** the e2e harness re-implements `main.ts`'s global setup by hand (pipe, three
+interceptors, filter) and omits the `session-redis` CSRF registration, so those two can drift
+from `main.ts`; the fix is to extract a shared `configureApp(app)`. `refresh()` recomputes the
+device meta without persisting it (pinned by a test, not security-relevant). The client is
+bearer-only — `api.ts` never sets `credentials: 'include'`, so it cannot use cookie sessions.
+
+---
+
+### Amendment (2026-09-14, end of Wave 8) — status of the open security items
+
+Supersedes the "Current project status (as of Wave 7)" and open-items table above; the Wave 1–7
+entries themselves are unchanged history.
+
+**Waves 1–8 of 8 complete.** All 13 phases of `plan.md` §11 are delivered. Gate as recorded
+under Wave 8. **No wave remains to dispatch.**
+
+| # | Item | Severity | Status |
+|---|---|---|---|
+| S1 | `logout` no-ops under `session-redis` | High (if session-redis ships) | **FIXED in Wave 8** — strategy reads its own session ref; regression-tested |
+| S2 | Session cookie never attached under `session-redis` | High (if session-redis ships) | **OPEN** — needs a contract decision (how a strategy delivers a response artifact) |
+| S3 | Baseline permission deletion (F1) | High | FIXED + mutation-verified (Wave 6) |
+| S4 | `auth.guard.spec.ts` absent — `@Public()` bypass, `req.user` untested | Medium | **FIXED in Wave 8** — new spec covers the bypass, the 401 path, the `req.user` assignment, and both transports |
+| S5 | Brute-force lockout + throttler unwired | High | FIXED in Wave 7 |
+| S6 | GraphQL depth/complexity limiting absent | Medium | FIXED in Wave 7 |
+| S7 | `@nestjs/throttler` peers stop at Nest `^11` | — | RESOLVED — stale metadata |
+| S8 | `rbac-core.hasRole`/`hasAnyPermission` lack `can()`'s null-guard | Low | Accepted |
+| S9 | `deletePermission` does not fan out `invalidate()` | Low | OPEN |
+| S10 | Mongoose normalizes email in-adapter; the other 3 do not | Low | OPEN, pre-existing |
+| S11 | Seed `findOrCreatePermission` never updates existing rows | Low | OPEN |
+| S12 | `autoSchemaFile` requires a writable `src/` in production | Low | OPEN |
+| **S13** | **GraphQL `variables` never reach Apollo on POST** — clients must inline literals | Medium-High | **OPEN — root cause re-characterized in Wave 8 (see above); the schema is NOT the cause** |
+| S14 | GraphQL rate-limit responses lack `X-RateLimit-*`/`Retry-After` | Low | Documented, by design |
+| S15 | Lockout timing: a locked account answers faster than a wrong password | Low | Accepted per spec |
+
+### Per-agent token cost, complete series
+
+| Wave | Agents | Total |
+|---|---|---|
+| 1–4 | see above | not recorded (earlier session) |
+| 5 | 4 build + 1 verifier | ≈ 292k |
+| 6 | 2 build + 1 verifier + 1 fix | ≈ 353k |
+| 7 | 2 build + 2 fix | ≈ 339k |
+| 8 | **none — built inline** | **0** |

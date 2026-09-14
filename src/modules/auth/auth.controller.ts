@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { FastifyRequest } from 'fastify';
 import type { AuthResult, RequestMeta } from '../../auth-strategies/auth-strategy.interface.js';
@@ -8,6 +8,7 @@ import { AuthGuard } from '../../common/guards/auth.guard.js';
 import { RbacGuard } from '../../common/guards/rbac.guard.js';
 import type { AuthenticatedUser } from '../../rbac-core/index.js';
 import { AuthService } from './auth.service.js';
+import { AuthzService } from './authz.service.js';
 import { LoginDto, RefreshDto, RegisterDto } from './dto/index.js';
 
 /**
@@ -26,7 +27,10 @@ const REFRESH_RATE_LIMIT = { default: { limit: 5, ttl: 60_000 } };
  */
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly authz: AuthzService,
+  ) {}
 
   @Public()
   @Throttle(REGISTER_RATE_LIMIT)
@@ -49,6 +53,17 @@ export class AuthController {
   @Post('refresh')
   refresh(@Body() dto: RefreshDto, @Req() request: FastifyRequest): Promise<AuthResult> {
     return this.auth.refresh(dto, requestMeta(request));
+  }
+
+  /**
+   * The caller's own identity with roles and permissions resolved through the active RBAC
+   * strategy (plan.md §11 Phase 12), so a client has one place to read "who am I and what may
+   * I do" after a reload — the session claims cannot answer it under db-live.
+   */
+  @UseGuards(AuthGuard, RbacGuard)
+  @Get('me')
+  me(@CurrentUser() user: AuthenticatedUser): Promise<AuthenticatedUser> {
+    return this.authz.describeIdentity(user);
   }
 
   /**

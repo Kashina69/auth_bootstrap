@@ -23,12 +23,15 @@ import type { IssuedSession, SessionRecord } from './session.types.js';
  * Redis. Logout/ban is therefore a single key deletion, no claim is ever exposed to
  * client-side JS, and every authenticated request costs one Redis round trip.
  *
- * **Cookie delivery:** `IAuthStrategy.login` receives no response object, so the session
- * id travels back to the caller inside `AuthResult.refreshToken` and the auth service
- * (`modules/auth/`) attaches it as a cookie via `createSessionCookieOptions()`, which is
- * the single source of truth for the mandatory flags — `httpOnly`, `secure` in
- * production, `sameSite=strict`, `path=/`, and a `maxAge` matching the Redis TTL.
- * The id is never logged by this class.
+ * **Cookie delivery — KNOWN GAP (open item S2):** `IAuthStrategy.login` receives no response
+ * object, so the session id travels back to the caller inside `AuthResult.refreshToken`;
+ * `createSessionCookieOptions()` is the single source of truth for the mandatory flags
+ * (`httpOnly`, `secure` in production, `sameSite=strict`, `path=/`, `maxAge` matching the
+ * Redis TTL). **Nothing attaches that cookie yet** — no caller has a response handle at the
+ * point it holds the id — so under this strategy the credential currently reaches the client
+ * only as an `AuthResult` field, and cookie-only refresh does not work. Closing it is a
+ * contract decision (how a strategy delivers a response artifact), not a controller patch;
+ * see `MEMORY.md`. The id is never logged by this class.
  */
 export class SessionRedisAuthStrategy implements IAuthStrategy {
   constructor(
@@ -51,10 +54,11 @@ export class SessionRedisAuthStrategy implements IAuthStrategy {
   }
 
   async logout(userId: string, sessionRef: unknown): Promise<void> {
-    if (!isSessionRef(sessionRef)) return;
-    const record = await readSession(this.redis, sessionRef);
+    const sessionId = resolveSessionId(sessionRef);
+    if (!sessionId) return;
+    const record = await readSession(this.redis, sessionId);
     if (record && record.userId !== userId) return;
-    await deleteSession(this.redis, sessionRef);
+    await deleteSession(this.redis, sessionId);
   }
 
   /**
@@ -102,12 +106,32 @@ function refreshDeviceAndExpiry(record: SessionRecord, meta: RequestMeta): Sessi
 }
 
 function requireSessionId(sessionRef: unknown): string {
-  if (!isSessionRef(sessionRef)) throw invalidSession();
-  return sessionRef;
+  const sessionId = resolveSessionId(sessionRef);
+  if (!sessionId) throw invalidSession();
+  return sessionId;
+}
+
+/**
+ * The session id as it reaches this strategy, in either of the two shapes the frozen
+ * `IAuthStrategy.logout(userId, sessionRef: unknown)` contract permits: the opaque id itself
+ * (what `login`/`refresh` return in `AuthResult.refreshToken`), or the platform request it
+ * rides on. The request case is not a convenience — the auth controller is deliberately
+ * transport-agnostic and passes the raw request through, so reading the cookie here is what
+ * keeps `logout` from silently invalidating nothing. Naming the cookie in the controller
+ * instead would hard-wire this one concrete strategy into a strategy-agnostic layer.
+ */
+function resolveSessionId(sessionRef: unknown): string | null {
+  if (isSessionRef(sessionRef)) return sessionRef;
+  if (isRequestLike(sessionRef)) return readSessionId(sessionRef);
+  return null;
 }
 
 function isSessionRef(sessionRef: unknown): sessionRef is string {
   return typeof sessionRef === 'string' && sessionRef.length > 0;
+}
+
+function isRequestLike(sessionRef: unknown): sessionRef is FastifyRequest {
+  return typeof sessionRef === 'object' && sessionRef !== null && 'headers' in sessionRef;
 }
 
 /** Identical message for "no such session" and "malformed ref" — nothing to enumerate. */

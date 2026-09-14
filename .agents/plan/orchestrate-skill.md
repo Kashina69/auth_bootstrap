@@ -1,6 +1,6 @@
 # orchestrate-skill.md — How to run this build with subagents
 
-Distilled from Waves 1–6 of the auth+rbac build. Binding on the orchestrator (the main
+Distilled from Waves 1–8 of the auth+rbac build. Binding on the orchestrator (the main
 chat). Workers never read this file — it tells the orchestrator how to *dispatch* them.
 
 Companion docs: `plan.agent.md` (the wave schedule), `MEMORY.md` (build log + decisions),
@@ -97,6 +97,23 @@ duplicated a `@Global()` check another agent had already run. Do it yourself.
 Rule: **if it is under ~10 lines and needs no exploration, the orchestrator does it.** Reserve
 agents for work that needs reading, writing, and iterating.
 
+### 6a. Sometimes dispatch no agent at all — Wave 8's rule
+
+Wave 8 (two endpoints, one hook, three spec files, one e2e suite) was built entirely inline and
+cost **0 agent tokens**, against 292k–353k for the waves before it. The distinguishing property
+is not size, it is **whether the work requires exploration**:
+
+| Dispatch an agent when the work needs… | Do it inline when… |
+|---|---|
+| reading unfamiliar code to decide *what* to write | every interface is frozen and written down |
+| iterating against a spec it must first locate | you already have the files in context |
+| a vertical spanning many files it must discover | the change is a handful of files at known paths |
+
+The honest caveat: this only applies if the orchestrator has *already* paid to load that context
+(it had, after a full wave of review). If you would have to read ten files to start, an agent's
+orientation tax is buying you something. **Test before dispatching: can I name every file I will
+edit, right now?** If yes, an agent adds cost and a hand-off seam for nothing.
+
 ## 7. The gate — orchestrator runs it
 
 Run all of these yourself; they cost almost nothing in tokens versus an agent doing it:
@@ -104,11 +121,16 @@ Run all of these yourself; they cost almost nothing in tokens versus an agent do
 ```
 pnpm build                              # exit 0
 pnpm test                               # exact file/test counts, must not decrease
+pnpm test:e2e                           # exit 0 — the per-AUTH_STRATEGY suite (Wave 8)
 pnpm exec tsc --noEmit -p tsconfig.json # exit 0 — NOT optional, see §8
 pnpm exec oxlint src/ test/             # exit 0
 node dist/main.js                       # boots, routes mapped, no throw
 # THEN execute real requests against the running app and assert on the responses.
 ```
+
+`tsc --noEmit` and the live-probe step are both load-bearing; the e2e suite is a *third*,
+weaker net — it substitutes the persistence boundary, so it proves the wiring and the HTTP
+surface, not the real drivers. Do not let a green e2e stand in for the boot + probe step.
 
 **The boot check must be followed by real requests.** A boot proves DI resolves; it does not
 prove anything *works*. Wave 7 found three separate crashes — in a global interceptor, the

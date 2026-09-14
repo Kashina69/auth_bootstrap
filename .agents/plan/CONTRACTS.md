@@ -305,6 +305,49 @@ Both modules are `@Global()`, provide their token (`AUTH_STRATEGY_TOKEN` /
 `REDIS_URL` is set, otherwise a stub that throws on any method call (so DI resolves under
 the default Redis-free env).
 
+## 11. Auth module surface (`modules/auth/`) — added Wave 8
+
+Promoted here on Wave 8's recommendation (Wave 5's checkpoint asked for it and it was never
+written). Nothing in §1–§10 changed to accommodate it; this records what already existed and
+what Wave 8 added, so a future agent stops having to read `modules/auth/` to learn the shape.
+
+```ts
+// modules/auth/auth.service.ts — frozen since Wave 5, unchanged
+class AuthService {
+  register(dto: RegisterDto, meta: RequestMeta): Promise<AuthResult>;
+  login(dto: LoginDto, meta: RequestMeta): Promise<AuthResult>;
+  refresh(dto: RefreshDto, meta: RequestMeta): Promise<AuthResult>;
+  logout(user: AuthenticatedUser, sessionRef: unknown): Promise<void>;
+}
+
+// modules/auth/authz.service.ts — Wave 8
+export interface PermissionCheckResult { allowed: boolean }
+
+class AuthzService {
+  // Identity with roles/permissions filled in by IAuthorizationProvider.getContext().
+  // Never read off user.roles/permissions directly: those are populated only by
+  // embedded-claims, so under db-live a claim-reading version reports nothing.
+  describeIdentity(user: AuthenticatedUser): Promise<AuthenticatedUser>;
+  // Exactly the can() RbacGuard uses, so a UI honouring it matches what the server enforces.
+  checkPermission(user: AuthenticatedUser, action: string, subject: string): Promise<PermissionCheckResult>;
+}
+
+// modules/auth/dto/check-permission.dto.ts — Wave 8. Split fields, not one "action:subject"
+// string, because a subject may itself contain a colon (matches @Permissions() semantics).
+class CheckPermissionDto { action: string; subject: string }
+```
+
+Routes, REST and GraphQL in lockstep (`AuthController`/`AuthResolver`, `AuthzController`/
+`AuthzResolver`):
+
+| REST | GraphQL | Guards | Notes |
+|---|---|---|---|
+| `GET /auth/me` | `me: AuthenticatedUserType!` | `AuthGuard`, `RbacGuard` | returns `AuthzService.describeIdentity()` |
+| `POST /authz/check` | `checkPermission(input): PermissionCheckResultType!` | `AuthGuard`, `RbacGuard` | **no `@Permissions()`** — asking about your own grants is not a privileged action; gating it on one would be circular |
+
+Both are self-introspection routes: they answer only about the caller, and take the identity from
+`@CurrentUser()` — never from the request body.
+
 ## Change log
 
 | Date | Change | By |
@@ -319,3 +362,5 @@ the default Redis-free env).
 | 2026-09-14 | Added `UserRepository.findUserIdsByRole(roleId)` — plan §5.5's `invalidate()` fan-out for role-scoped mutations was unimplementable without a users-of-a-role lookup | orchestrator |
 | 2026-09-14 | Added `RoleRepository.detachPermissions(roleId, permissionIds)` — Phase 9 specifies CRUD but the contract had no way to remove a grant (`attachPermissions` is strictly additive) | orchestrator |
 | 2026-09-14 | §7 env schema gained an **optional** `CORS_ORIGINS` (comma-separated). Additive only — the frozen strategy/provider enums are unchanged, and leaving it unset must keep booting (CORS stays deny-all) | orchestrator |
+| 2026-09-14 | Added §11 — the `modules/auth/` surface, promoting the Wave 5 service signatures that were frozen but never written down, plus Wave 8's `AuthzService`, `CheckPermissionDto`, and the `GET /auth/me` / `POST /authz/check` routes (REST + GraphQL). **Purely additive** — §1–§10 are unchanged, and no frozen interface was touched | orchestrator |
+| 2026-09-14 | `SessionRedisAuthStrategy.logout` now interprets a **request-shaped** `sessionRef` as well as the opaque session id. No signature change: `IAuthStrategy.logout(userId, sessionRef: unknown)` is unchanged, and §3 already states the strategy interprets its own transport. Fixes open item S1, where the controller passed the request and the strategy rejected it as non-string, so the session was never invalidated. Contained in `auth-strategies/session-redis/` | orchestrator |

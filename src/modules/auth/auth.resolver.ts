@@ -1,5 +1,5 @@
 import { UseGuards } from '@nestjs/common';
-import { Args, Context, Mutation, Resolver } from '@nestjs/graphql';
+import { Args, Context, Mutation, Query, Resolver } from '@nestjs/graphql';
 import { Throttle } from '@nestjs/throttler';
 import type { FastifyRequest } from 'fastify';
 import type { RequestMeta } from '../../auth-strategies/auth-strategy.interface.js';
@@ -7,9 +7,10 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import { Public } from '../../common/decorators/public.decorator.js';
 import { AuthGuard } from '../../common/guards/auth.guard.js';
 import { RbacGuard } from '../../common/guards/rbac.guard.js';
-import { AuthResultType } from '../../graphql/types/auth-result.type.js';
+import { AuthenticatedUserType, AuthResultType } from '../../graphql/types/auth-result.type.js';
 import type { AuthenticatedUser } from '../../rbac-core/index.js';
 import { AuthService } from './auth.service.js';
+import { AuthzService } from './authz.service.js';
 import { LoginDto, RefreshDto, RegisterDto } from './dto/index.js';
 
 /** The GraphQL context `@nestjs/graphql` builds — the same platform request the guards read. */
@@ -36,7 +37,10 @@ const REFRESH_RATE_LIMIT = { default: { limit: 5, ttl: 60_000 } };
  */
 @Resolver()
 export class AuthResolver {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    private readonly authz: AuthzService,
+  ) {}
 
   @Public()
   @Throttle(REGISTER_RATE_LIMIT)
@@ -57,6 +61,16 @@ export class AuthResolver {
   @Mutation(() => AuthResultType)
   refresh(@Args('input') dto: RefreshDto, @Context() context: GqlContext): Promise<AuthResultType> {
     return this.auth.refresh(dto, requestMeta(context.req));
+  }
+
+  /**
+   * The GraphQL twin of `GET /auth/me`: the caller's identity with roles and permissions
+   * resolved through the active RBAC strategy, so the two transports cannot disagree.
+   */
+  @UseGuards(AuthGuard, RbacGuard)
+  @Query(() => AuthenticatedUserType)
+  me(@CurrentUser() user: AuthenticatedUser): Promise<AuthenticatedUser> {
+    return this.authz.describeIdentity(user);
   }
 
   /**

@@ -14,6 +14,12 @@ export default defineConfig({
       DATABASE_URL: 'postgresql://auth:auth@localhost:5432/auth_e2e',
       JWT_ALGORITHM: 'HS256',
       JWT_SECRET: 'e2e-only-ephemeral-secret-value-at-least-32-chars',
+      // Pinned so the suite is deterministic: the Phase 13 matrix varies AUTH_STRATEGY, and
+      // coupling that to a second axis would double the runs without covering anything new.
+      // db-live has its own unit spec; REDIS_URL only has to satisfy the schema (no live
+      // Redis is dialed — `ioredis` is mocked in the spec).
+      RBAC_STRATEGY: 'embedded-claims',
+      REDIS_URL: 'redis://localhost:6379',
     },
   },
 });
