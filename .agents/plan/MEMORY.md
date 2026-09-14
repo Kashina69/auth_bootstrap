@@ -576,3 +576,38 @@ Open items / risks (Wave 8 additions first):
 **Durable on disk:** the whole Wave 8 checkpoint (code + these plan docs) is committed at
 `028cd00` — *"chore: auth+rbac bootstrap checkpoint — waves 1-8 complete"*. The companion client
 is committed separately in `../client/` at `57ff6da`. Working trees are clean in both.
+
+### Port playbooks added (2026-09-14)
+
+Two agent-facing port skills were written, verified against HEAD rather than assumed:
+
+- **`PORT-EXPRESS.md`** — stays on NestJS, swaps the HTTP adapter + the three `@fastify/*`
+  plugins. Small, surgical. Records the empirically-proven blocker (the Apollo driver
+  `loadPackage`s `@as-integrations/express5` and hard-exits when it is absent — the exact failure
+  the deleted scaffold e2e produced), the `.code()` → `.status()` fix, the inverted
+  `app.enableCors()` trap, and the `trust proxy` / `req.ip` correctness issue that silently
+  collapses the per-IP throttler into one bucket.
+- **`PORT-FRAMEWORK.md`** — leaving NestJS for Hono / Next.js / Elysia / bare Express. Built
+  around the three-layer split the codebase's own design already produced: **invariant core**
+  (`rbac-core` + repositories + the 4 strategy classes — all verified to carry *zero* Nest
+  decorators), **wiring + port tax**, and **HTTP shell**.
+
+Facts established while writing them (all grep-verified, none assumed):
+
+- `src/rbac-core/` and `src/database/repositories/` contain **zero** `@nestjs` imports.
+- All four strategy classes have **zero** `@Injectable`/`@Inject`/`@Module` decorators — they are
+  already plain classes, constructible outside any DI container. This is what makes a port
+  tractable and is worth protecting.
+- The real port tax is **~52 HTTP-exception throw sites inside domain code**
+  (27 `Unauthorized`, 8 `NotFound`, 8 `Conflict`, 7 `Forbidden`, 2 `InternalServerError`) plus
+  `@nestjs/jwt` (used only for `sign`/`verify`/`decode`), `Logger` (13 sites) and
+  `@nestjs/config`. `PORT-FRAMEWORK.md` §3 gives two resolutions and recommends the cheap one
+  (a domain-error shim) for a first port.
+- `@Module()` appears in **9** files; `FastifyRequest`/`FastifyReply` in **9** source files.
+  (Both counts were wrong on first draft and corrected before commit — the §9 discipline of
+  checking the artifact, not the impression.)
+- `pnpm test:e2e`'s 42 assertions are the port's oracle: they speak only HTTP and the
+  `{ data, meta }` envelope, so a port rewrites the harness and leaves every assertion
+  byte-identical. A failing assertion is then a port defect, not a test to adjust.
+
+Neither playbook changes any code. They are documentation only.

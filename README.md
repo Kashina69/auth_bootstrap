@@ -140,6 +140,8 @@ Everything a resuming chat needs is in **`.agents/plan/`** — read them in this
 | `plan.md` / `implementation.spec.md` | The architecture and the security-critical code spec | for the original intent |
 | `plan.agent.md` | The original wave schedule (Waves 1–8) | historic reference only — it is done |
 | `STYLE.md` | The binding code-style contract | paste into every agent prompt |
+| `PORT-EXPRESS.md` | Swapping the HTTP adapter to Express, staying on NestJS | to move to NestJS + Express |
+| `PORT-FRAMEWORK.md` | Leaving NestJS for Hono, Next.js, Elysia, bare Express… | to port the whole stack to another framework |
 
 **There is no next wave to dispatch.** Future work is *remediation and extension*, not the
 original build — start from the open-items table in `WAVE-LOG.md` (S2 is the highest-severity

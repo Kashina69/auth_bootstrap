@@ -7,6 +7,11 @@ Companion docs: `plan.agent.md` (the wave schedule), `MEMORY.md` (build log + de
 `WAVE-LOG.md` (per-wave ledger: agents, tokens, gate, issues, security). This file is the
 *process*; those are the *content*.
 
+**Porting to another backend framework?** Read `PORT-EXPRESS.md` (NestJS + Express — a small
+adapter swap) or `PORT-FRAMEWORK.md` (leaving NestJS entirely — Hono, Next.js, Elysia…). Both
+define their own wave plans, owned paths and acceptance gates, and both defer to this file for
+dispatch mechanics, so everything in §4–§8 still applies.
+
 ---
 
 ## 1. The one rule: an agent's cost ≈ its scope + a fixed orientation tax
