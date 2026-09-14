@@ -13,6 +13,42 @@ applies), `CONTRACTS.md` (the interfaces under test, §9 = the security invarian
 
 ---
 
+## 0. How to consume this file
+
+**Hand this to an orchestrator chat and say "build the test suite per TEST-PLAN.md".** This file
+does not itself spawn anything — it is a specification an orchestrating agent executes. It
+assumes the chat can spawn subagents and run them concurrently; that is the only harness
+requirement. No other skill, plugin or tool is assumed.
+
+**Granularity policy — one agent per SECTION, never per file.** This is the whole point of the
+shape below, and it is the rule `orchestrate-skill.md` §1 already measured: *cost scales with
+scope, not with layer count; splitting one task across N agents does not divide its cost N ways,
+because every agent re-pays the orientation tax* (locating files, reading contracts) on top of
+its share of the work.
+
+So: **4 agents total**, one per section, dispatched **in parallel**, each owning a whole
+directory of test work. Never one agent per adapter, per endpoint, or per spec file. The
+sections in §5 were chosen so that no two agents share a file, which is what makes the
+parallelism safe — not so that each agent has minimal scope.
+
+| Do | Don't |
+|---|---|
+| One agent owns **all four** ORM adapter contract specs | Four agents, one per adapter |
+| One agent owns the whole GraphQL e2e section | One agent per resolver |
+| One agent owns the whole live-service integration section | One agent per Redis behaviour |
+| One agent owns all remaining unit gaps | One agent per untested file |
+
+**Context and cost expectations:** each section agent should land around **40–100k tokens**.
+If one blows past ~150k, it has drifted outside its section — stop it and re-scope rather than
+letting it keep going. §2 of `orchestrate-skill.md` has the measured per-agent figures this is
+based on.
+
+**The orchestrator's own job, unchanged from `orchestrate-skill.md` §13:** run the gate, do the
+small wiring yourself, spot-check claims in one command rather than delegating, and own the
+commits. §5's Wave 0 is orchestrator-only work and is the largest single piece of it.
+
+---
+
 ## 1. Where the suite actually stands (verified at HEAD `0e05f43`)
 
 ```
@@ -182,152 +218,248 @@ Kinds 2, 3 and 6 do not exist at all today. Kind 5 does not exist. They are the 
 
 ---
 
-## 5. The waves
+## 5. The dispatch plan — Wave 0, then 4 parallel section agents
 
-Sequenced per `orchestrate-skill.md` §2/§4: nothing parallel shares a file, interfaces are frozen
-before dispatch, and anything under ~10 lines stays with the orchestrator (§6a).
+**Shape: one orchestrator-only prerequisite wave, then four agents dispatched simultaneously,
+one per section.** Four agents, total. Not four per section — four *in total*.
 
-### Wave 0 — prerequisites (orchestrator, no agents)
+### Wave 0 — prerequisites (orchestrator only, no agents)
 
-Everything else is blocked on these three, and they are each small.
+Everything here is small, shared, and blocking. It is done by the orchestrator because **each
+item is a file two or more section agents would otherwise fight over** — which is the actual
+reason parallelism is safe afterwards.
 
-1. **Extract `configureApp(app)` from `main.ts`** and call it from both `main.ts` and the e2e
-   harness (§3.5). This is the change that makes kind 4 and 5 honest. Verify the existing 42 e2e
-   tests still pass **unmodified** before moving on.
-2. **Add a `test` service stack** — `docker-compose.test.yml` with Postgres + Redis, plus
-   `test:services:up` / `down` scripts. Include a `redis-cli ping` + `pg_isready` readiness
-   check; a test run against a half-started Postgres produces confusing failures rather than
-   clean ones.
-   **There is no compose file in the repo today** — `setup.md` documents plain `docker run`
-   commands (`postgres:16` on `5432`, `redis:8` on `6379`, containers named `auth-postgres` /
-   `auth-redis`). **Use different host ports for the test stack** (e.g. `55432` / `56379`) so a
-   developer's running dev stack does not silently become the test database — that failure mode
-   shows up as "tests pass locally, destroy my data", and it is worth the two extra port
-   numbers. Match the same image versions `setup.md` pins.
-3. **Add the coverage block and thresholds to both configs** (§6). Start the thresholds at
-   whatever the suite currently achieves, so they ratchet rather than red-line on day one.
+| # | Task | Why it cannot be delegated |
+|---|---|---|
+| 1 | Extract `configureApp(app)` from `main.ts`; call it from `main.ts` **and** the existing e2e harness | §3.5. One file, two consumers — a shared boundary |
+| 2 | Extract the e2e harness into `test/support/harness.ts` (`createTestApp()`, `authorize()`, the in-memory store wiring); refactor `auth.e2e-spec.ts` to use it | Same: agents B and C both need it and **must not edit it** |
+| 3 | `docker-compose.test.yml` (Postgres 16 / Redis 8 on `55432`/`56379`) + `test:services:up`/`down` | Shared infrastructure |
+| 4 | **Both** new vitest configs (`vitest.config.contract.ts`, `vitest.config.integration.ts`) **and all `package.json` scripts** | Otherwise agents A and C both edit `package.json` and both create a config — a guaranteed write race |
+| 5 | Coverage block + ratcheted thresholds in both configs (§6) | Shared config |
 
-*Gate: existing gate green, `docker compose -f docker-compose.test.yml up -d` healthy, `test:cov`
-produces a report.*
+*Gate: the existing 42 e2e assertions still pass **unmodified** after the harness refactor, and
+`docker compose -f docker-compose.test.yml up -d` reports healthy.*
 
-### Wave 1 — the adapter contract suite 🔴 (highest value; 1 agent + orchestrator review)
+### Wave 1 — four agents, simultaneously
 
-**One test file, four providers** — the same trick Phase 13 used for strategies, applied to
-persistence. This is the answer to §3.1.
+| Agent | Owns (a whole section) | Depends on |
+|---|---|---|
+| **A** `db-contract-agent` | `test/contract/**` — the shared contract file **and** all four provider specs | Wave 0 (docker, config, scripts) |
+| **B** `graphql-e2e-agent` | `test/graphql.e2e-spec.ts` (+ any GraphQL-specific support files) | Wave 0 (harness) |
+| **C** `integration-agent` | `test/integration/**` — Redis sessions, lockout, db-live cache, migrations, S2 | Wave 0 (docker, config, scripts) |
+| **D** `unit-gap-agent` | New `*.spec.ts` beside the §3.4 source files | nothing |
 
-Shape:
+**Shared-file rules that make this safe:**
 
-```ts
-// test/contract/repository-contract.ts   — no framework, no ORM, just assertions
-export function defineRepositoryContract(
-  name: string,
-  createRepositories: () => Promise<{
-    users: UserRepository; roles: RoleRepository;
-    permissions: PermissionRepository; refreshTokens: RefreshTokenRepository;
-    reset: () => Promise<void>;
-  }>,
-): void { /* describe() with the full behavioural contract */
-}
-```
+- `test/support/**` is **frozen after Wave 0**. A–D import it; none may edit it. Needing a change
+  means reporting back to the orchestrator, not editing (`orchestrate-skill.md` §4).
+- `package.json`, both vitest configs, `main.ts` — **frozen after Wave 0**. Sections add no
+  scripts and no config.
+- A and D touch different trees entirely. B and C touch different files. No pair shares a file.
 
-```ts
-// test/contract/prisma-repository.contract-spec.ts
-defineRepositoryContract('prisma', () => createPrismaRepositories(TEST_DATABASE_URL));
-// …and three more, one per provider
-```
+**If you want to go cheaper still:** drop D. It is the lowest-risk section, and its files can be
+picked up later or folded into a follow-up. A, B and C are the ones that close real holes.
 
-The contract must assert the behaviour `CONTRACTS.md` §5 *promises*, not what any one adapter
-happens to do:
+**Sizing guard:** each agent should land near **40–100k tokens**. Past ~150k it has left its
+section — stop it and re-scope (`orchestrate-skill.md` §2). Do **not** subdivide a section that
+is running long; that just multiplies the orientation tax.
 
-- **not-found normalizes to `null`** — never an ORM-specific exception, in every `find*`
-- **the soft-delete filter** — `findById`/`findByEmail` return `null` for a `deletedAt`-set user
-  (a deactivated account must not authenticate; three adapters originally got this wrong)
-- `assignRole` is **idempotent**
-- `attachPermissions` / `detachPermissions` are idempotent, and `detach` actually removes
-- `findRolesAndPermissions` returns role and permission **names**
-- `findUserIdsByRole` returns exactly the holders
-- refresh tokens: **only the SHA-256 hash is ever persisted**, `revokeFamily` and
-  `revokeAllForUser` are scoped correctly
-- `create` on a `Permission`/`Role` round-trips `isSystem`
-- **email handling (the S10 decision point).** The contract suite will expose that Mongoose
-  normalizes email in-adapter while the other three do not. Do **not** paper over it: either
-  make all four consistent or write the divergence into `CONTRACTS.md` §5 as an explicit,
-  intentional exception with the service-boundary normalization as the reason. A silent
-  `expect` that differs per provider defeats the purpose of a contract suite.
+### Wave 2 — orchestrator gate + one verifier
 
-Assign the **orchestrator** to write `repository-contract.ts` (it is the interface everyone codes
-against — `orchestrate-skill.md` §4 says freeze interfaces yourself), then dispatch **four
-parallel agents**, one per adapter, each owning exactly one `*-repository.contract-spec.ts` plus
-the `reset()`/factory helper for its provider. No two agents touch the same file.
+Run the full gate (§9). Then dispatch **one** diff-scoped adversarial verifier
+(`orchestrate-skill.md` §8 Tier 1) over the whole wave's diff. Ask it the questions static checks
+cannot answer:
 
-Some providers need schema setup before assertions: run the repo's migrations for Postgres
-providers, and have the Mongoose factory create/drop its collections. Do that **inside each
-provider's factory**, not in the shared contract.
+- does any new test **pass with the implementation removed** (i.e. does it test a mock)?
+- is the soft-delete assertion and the hash-at-rest assertion actually load-bearing — did anyone
+  mutation-check them (§2b)?
+- did the contract suite quietly weaken a per-provider expectation to make one adapter pass?
+- was any existing assertion in `auth.e2e-spec.ts` modified?
 
-*Gate: all four contract specs green against live services; mutation-check the soft-delete and
-hash-at-rest assertions.*
-
-### Wave 2 — GraphQL e2e 🔴 (1 agent, sequential, depends on Wave 0's `configureApp`)
-
-Mirror the REST e2e for the GraphQL transport, in `test/auth.e2e-spec.ts` or a sibling file that
-reuses the same in-memory stores and harness:
-
-- the four auth **mutations** (`register`, `login`, `refresh`, `logout`) and the **queries**
-  (`me`, `checkPermission`)
-- **a query using GraphQL variables** — this is the S13 regression test and it fails today
-- the guarded `me`/`checkPermission` reachable unauthenticated → `Unauthorized` in `errors[]`
-- throttle the GraphQL `login` mutation and assert it is limited (Wave 7 established GraphQL is
-  **not** a rate-limit bypass — pin that, because "fixing" a GraphQL throttler crash by skipping
-  non-HTTP contexts is an auth bypass, not a convenience)
-- **parity**: for each operation, the GraphQL result must match the REST result for the same
-  input. That is the actual architectural claim; test the claim, not the endpoints
-
-Expect S13 to fail on first run. That is the test doing its job. Either fix S13 in this wave or
-mark the test `it.fails(...)`/skipped with a link to the open item — but do not delete it.
-
-*Gate: GraphQL e2e green (or S13 explicitly quarantined with a tracked reason).*
-
-### Wave 3 — live-service integration 🟡 (1–2 agents)
-
-Against the real stack, for behaviour in-memory fakes cannot prove:
-
-- **`session-redis` end-to-end with real Redis** — session TTL, sliding expiration on refresh,
-  logout deletes the key, a deactivated user's session stops working
-- **lockout** (`LoginAttemptService`, spec §6): 10 failures in the window → locked; the message
-  is identical to a wrong password; the window expires; Redis down ⇒ **fails open** (a dead
-  Redis must not lock everyone out — that is a deliberate design decision, so pin it)
-- **`db-live` cache**: 5s TTL, and `invalidate()` makes an admin change visible immediately
-- **S2's cookie transport** — this is the one that will not pass as written. `createSessionCookieOptions()`
-  is never called (S2, High severity, open). Write the test to assert the *intended* behaviour,
-  watch it fail, and let that failure drive the contract decision. If the team defers, mark it
-  skipped with the item number — an untested known hole is acceptable; an unknown one is not
-- migrations produce a schema matching the ORM definitions; the unique-email constraint is real
-  (S11's `findOrCreatePermission` behaviour belongs here too)
-
-*Gate: green against live services, or each deferral explicitly skipped with its S-number.*
-
-### Wave 4 — coverage ratchet + the unit gaps of §3.4 (1 agent, or orchestrator)
-
-Cheap, mechanical, and it should come last so the thresholds reflect the finished suite. Write
-the missing direct specs for the §3.4 table, then raise the coverage thresholds to the new floor.
-Prioritise by blast radius: `session-cookie.ts` (hand-rolled parser on the auth path),
-`authz-context-cache.ts` (key collision = cross-user leak), `token.service.ts` (the pinning),
-`transform.interceptor.ts` (client-visible contract) — then the decorators, DTOs and seed.
-
-*Gate: `test:cov` meets the ratcheted thresholds; every §3.4 file has a spec or a recorded reason
-it does not.*
-
-### Wave 5 — boot smoke + wire into the gate (orchestrator)
-
-Kind 6: a script that boots `dist/main.js`, asserts the route map (`/auth/*`, `/authz/check`,
-`/rbac-admin/*`, `/graphql`), asserts a clean exit on shutdown, and runs in CI. It is ~20 lines
-and catches the class of failure that `build`+`test` cannot (`orchestrate-skill.md` §7 — Wave 6
-learned this when the Apollo driver needed `@as-integrations/fastify` merely to start).
-
-Then update `orchestrate-skill.md` §7's gate block to include `test:contract`,
-`test:integration` and `smoke`.
+Do **not** dispatch one verifier per section. One verifier, the whole diff.
 
 ---
+
+### Dispatch prompts (copy-paste; each assumes Wave 0 is merged and green)
+
+Every prompt follows `orchestrate-skill.md` §5: role, owned paths + do-not-touch, exact reads,
+frozen interfaces copied in, environment constraints, style contract, verification command, and
+a short report format. Paste `STYLE.md` inline in each rather than telling the agent to read it.
+
+**A — `db-contract-agent`**
+
+```
+You are ONE OF FOUR agents running CONCURRENTLY in /home/prince/code/project/nest/auth.
+You own the ENTIRE database contract-test section. No other agent will touch your files.
+
+OWNED PATHS (create/edit only these):
+  test/contract/repository-contract.ts          — the shared behavioural contract
+  test/contract/{prisma,drizzle,sequelize,mongoose}-repository.contract-spec.ts
+  test/contract/support/*.ts                    — per-provider factories + reset()
+
+DO NOT TOUCH: test/support/**, test/auth.e2e-spec.ts, test/integration/**,
+  vitest.config*.ts, package.json, main.ts, anything under src/.
+  If you need a change in any of those, STOP and report it instead.
+
+READ ONLY THIS (not the whole repo):
+  .agents/plan/CONTRACTS.md §5 (repository contracts + entity shapes) and §9 (invariants)
+  .agents/plan/TEST-PLAN.md §3.1, §5 Wave 1, §7
+  src/database/repositories/user.repository.ts, role.repository.ts,
+    permission.repository.ts, refresh-token.repository.ts
+  ONE existing adapter per family, to learn its constructor:
+    src/database/repositories/prisma-user.repository.ts, drizzle-user.repository.ts,
+    sequelize-user.repository.ts, mongoose-user.repository.ts
+
+DELIVERABLE: one shared contract file exporting defineRepositoryContract(name, factory),
+plus four thin specs, one per DB_PROVIDER, each passing its own Docker-backed factory.
+The contract must assert CONTRACTS §5 behaviour, NOT what one adapter happens to do:
+  - every find* returns null when absent — never an ORM-specific exception
+  - the SOFT-DELETE filter: findById/findByEmail return null for a deletedAt-set user
+  - assignRole idempotent; attachPermissions/detachPermissions idempotent, detach removes
+  - findRolesAndPermissions returns NAMES; findUserIdsByRole returns exactly the holders
+  - refresh tokens: ONLY the SHA-256 hash is persisted; revokeFamily/revokeAllForUser scoped
+  - create() round-trips isSystem on Role and Permission
+  - email handling: if the four adapters DISAGREE, do NOT paper over it. Report the
+    divergence with evidence — it is item S10 and it must become a fix or a written
+    exception in CONTRACTS §5, not a per-provider expect().
+
+ENVIRONMENT: ESM — every relative import needs a .js extension. Test DB is
+  postgresql://...@localhost:55432 (docker-compose.test.yml, already running).
+  Run migrations inside YOUR factories, never in the shared contract.
+
+VERIFY WITH: pnpm exec tsc --noEmit -p tsconfig.json   (do NOT run pnpm build — agents
+  run concurrently and would race on dist/)
+
+REPORT (short): files created; the exact command + result; whether the four adapters
+  agreed on email handling; anything you were blocked on. No essays.
+```
+
+**B — `graphql-e2e-agent`**
+
+```
+You are ONE OF FOUR agents running CONCURRENTLY in /home/prince/code/project/nest/auth.
+You own the ENTIRE GraphQL e2e section.
+
+OWNED PATHS: test/graphql.e2e-spec.ts (plus test/support/graphql-*.ts if you truly need
+  a GraphQL-only helper).
+DO NOT TOUCH: test/support/harness.ts (FROZEN — import it), test/auth.e2e-spec.ts,
+  test/contract/**, test/integration/**, vitest.config*.ts, package.json, src/**.
+  If src/ seems to need a change, STOP and report — that is a finding, not a task.
+
+READ ONLY THIS:
+  .agents/plan/TEST-PLAN.md §3.2, §5 Wave 1, §7
+  .agents/plan/WAVE-LOG.md §Wave 6 + the S13 entry
+  test/auth.e2e-spec.ts (the REST suite — mirror its structure and reuse the harness)
+  src/schema.gql (the generated schema — the queries/mutations you must exercise)
+  src/modules/auth/auth.resolver.ts, src/modules/auth/authz.resolver.ts
+
+DELIVERABLE: the GraphQL half of the e2e suite, same file run once per AUTH_STRATEGY:
+  - mutations: register, login, refresh, logout; queries: me, checkPermission
+  - MUST include an operation that uses GraphQL VARIABLES, not just inline literals.
+    This is the S13 regression test. Expect it to FAIL — that is the point. If it fails,
+    either fix S13 (report it) or quarantine the single test with it.fails() plus a
+    comment naming S13 and WAVE-LOG. Do NOT delete it and do NOT weaken it.
+  - unauthenticated me/checkPermission -> Unauthorized inside errors[]
+  - throttle the login mutation and assert it is limited: Wave 7 proved GraphQL is NOT a
+    rate-limit bypass. Pin that property.
+  - PARITY: for each operation, the GraphQL result must match the REST result for the
+    same input. That is the actual architectural claim (plan.md §10) — test the claim.
+
+ENVIRONMENT: ESM — .js extensions on relative imports. GraphQL goes through
+  @as-integrations/fastify; it is already wired and boots.
+
+VERIFY WITH: pnpm exec tsc --noEmit -p tsconfig.json, then
+  pnpm exec vitest run --config ./vitest.config.e2e.ts
+  (never pnpm build — agents run concurrently and would race on dist/)
+
+REPORT (short): files created; exact command + result; S13 status (fixed / quarantined);
+  any REST-vs-GraphQL divergence you found. No essays.
+```
+
+**C — `integration-agent`**
+
+```
+You are ONE OF FOUR agents running CONCURRENTLY in /home/prince/code/project/nest/auth.
+You own the ENTIRE live-service integration section.
+
+OWNED PATHS: test/integration/** (plus test/integration/support/**).
+DO NOT TOUCH: test/support/**, test/contract/**, test/auth.e2e-spec.ts,
+  test/graphql.e2e-spec.ts, vitest.config*.ts, package.json, src/**.
+  If src/ seems to need a change, STOP and report it.
+
+READ ONLY THIS:
+  .agents/plan/TEST-PLAN.md §3.6, §5 Wave 1, §7 (flakiness rules — follow them exactly)
+  .agents/plan/CONTRACTS.md §9 (security invariants)
+  .agents/plan/WAVE-LOG.md — items S2, S9, S10, S11
+  src/common/security/login-attempt.service.ts
+  src/auth-strategies/session-redis/{session-store,session-cookie}.ts
+  src/rbac-strategies/db-live/{db-live.authorization-provider,authz-context-cache}.ts
+
+DELIVERABLE — real Redis, real Postgres:
+  - session-redis with REAL Redis: TTL set, sliding expiration on refresh, logout deletes
+    the key, a deactivated user's session stops working
+  - lockout (spec §6): 10 failures in the window -> locked; message IDENTICAL to a wrong
+    password; window expiry; and Redis DOWN => FAILS OPEN (deliberate — a dead Redis must
+    not lock everyone out. Pin it.)
+  - db-live cache: 5s TTL, and invalidate() makes an admin change visible immediately
+  - migrations vs ORM definitions: schema matches; the unique-email constraint is real
+  - S2 (session cookie never attached): write the test for the INTENDED behaviour, watch
+    it fail, and report it. If deferring, skip it with a comment naming S2 — an untested
+    known hole is acceptable; a silently missing test is not.
+
+ENVIRONMENT: ESM — .js extensions. Test stack is docker-compose.test.yml:
+  Postgres localhost:55432, Redis localhost:56379 (already running).
+  NEVER use fake timers around argon2 — it is a native async KDF and will deadlock.
+  Use a short REAL lockout window via a test-only env override instead.
+
+VERIFY WITH: pnpm exec tsc --noEmit -p tsconfig.json, then
+  pnpm exec vitest run --config ./vitest.config.integration.ts
+  (never pnpm build — agents run concurrently and would race on dist/)
+
+REPORT (short): files created; exact command + result; S2 outcome; anything deferred with
+  its S-number. No essays.
+```
+
+**D — `unit-gap-agent`**
+
+```
+You are ONE OF FOUR agents running CONCURRENTLY in /home/prince/code/project/nest/auth.
+You own the remaining unit-test gaps. You touch ONLY new spec files — no source edits.
+
+OWNED PATHS: new *.spec.ts files sitting beside these sources:
+  src/auth-strategies/session-redis/session-cookie.ts
+  src/auth-strategies/session-redis/session-store.ts
+  src/auth-strategies/jwt-stateless/token.service.ts
+  src/rbac-strategies/db-live/authz-context-cache.ts
+  src/common/interceptors/{transform,timeout}.interceptor.ts
+  src/common/decorators/{public,roles,current-user}.decorator.ts
+  src/modules/*/dto/*.dto.ts
+  src/database/seed/rbac.seed.ts
+DO NOT TOUCH: any non-spec source file. DO NOT TOUCH test/**, vitest.config*.ts,
+  package.json. If a test reveals a SOURCE bug, STOP and report — do not fix src/.
+
+READ ONLY THIS:
+  .agents/plan/TEST-PLAN.md §3.4, §7
+  src/common/interceptors/logging.interceptor.spec.ts  (the in-repo pattern to follow)
+  the source files listed above.
+
+PRIORITISE BY BLAST RADIUS, in this order:
+  1. session-cookie.ts — a hand-rolled cookie parser on the authentication path
+  2. authz-context-cache.ts — a key collision is a CROSS-USER PERMISSION LEAK
+  3. token.service.ts — the only place algorithms/issuer/audience are pinned
+  4. transform.interceptor.ts — the { data, meta } envelope the Next.js client depends on
+  5. the rest (decorators, DTO validation rules, seed idempotency)
+Assert BEHAVIOUR AND INVARIANTS (TEST-PLAN §2a), never that a mock returned what you told
+it to. A test that would still pass with the implementation deleted is a defect.
+
+ENVIRONMENT: ESM — .js extensions on relative imports. Never fake timers around argon2.
+
+VERIFY WITH: pnpm exec tsc --noEmit -p tsconfig.json, then pnpm test
+  (never pnpm build — agents run concurrently and would race on dist/)
+
+REPORT (short): files created; exact command + result (file/test counts); any source bug
+  you found but did NOT fix. No essays.
+```
 
 ## 6. Coverage policy
 

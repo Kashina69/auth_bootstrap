@@ -642,3 +642,18 @@ The plan's central proposal is a **repository contract suite** — one shared be
 file run against all four ORM adapters, the same "one spec file, N providers" trick Phase 13 used
 for the auth strategies. It is the only practical way to test 16 adapter files, and it forces
 S10 and S11 to a decision instead of leaving them as notes.
+
+**TEST-PLAN.md revised same day — granularity fix.** The first draft specified Wave 1 as **four
+agents, one per ORM adapter**. That was wrong and was corrected to **four agents *in total*, one
+per section** (`db-contract`, `graphql-e2e`, `integration`, `unit-gap`), dispatched in parallel.
+It contradicted `orchestrate-skill.md` §1's own measured finding — cost scales with scope, not
+layer count, and splitting one task across N agents does not divide its cost because each agent
+re-pays the orientation tax. The four adapters share one contract file, so the shared-boundary
+work (the contract itself, plus both vitest configs and all `package.json` scripts) is done by
+the orchestrator in Wave 0; that is precisely what makes the four-way parallel safe.
+
+Two other additions from the same pass: §0 states plainly that the file is a *specification an
+orchestrator executes*, not something that spawns agents itself (the only harness requirement is
+the ability to spawn subagents concurrently), and §5 now carries **copy-paste dispatch prompts**
+for each of the four sections, so the orchestrator's dispatching is mechanical rather than
+improvised.
