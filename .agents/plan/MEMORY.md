@@ -572,3 +572,7 @@ Open items / risks (Wave 8 additions first):
   normalizes email in-adapter, the other three do not); S11 (seed `findOrCreatePermission` never
   updates existing rows); S12 (`autoSchemaFile` needs a writable `src/` in production); S14/S15
   (GraphQL throttle headers; lockout timing).
+
+**Durable on disk:** the whole Wave 8 checkpoint (code + these plan docs) is committed at
+`028cd00` — *"chore: auth+rbac bootstrap checkpoint — waves 1-8 complete"*. The companion client
+is committed separately in `../client/` at `57ff6da`. Working trees are clean in both.
