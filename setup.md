@@ -28,7 +28,7 @@ Open `.env`. For a first run you only need to confirm these (defaults work):
 | Variable | First-run value | Why |
 |---|---|---|
 | `NODE_ENV` | `development` | Enables GraphQL playground |
-| `PORT` | `3000` (or free port) | Must not clash with your frontend dev server |
+| `PORT` | `3000` (or free port) | Must not clash with your frontend dev server. The `.env` value is honored (it's schema-validated); a shell `PORT=` prefix overrides it per-run |
 | `DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/auth` | Matches the Docker command below |
 | `JWT_ALGORITHM` / `JWT_SECRET` | `HS256` + dev secret from template | Zero-key auth for local dev |
 | `CORS_ORIGINS` | Your frontend origin, e.g. `http://localhost:3001` | Unset = browser clients blocked |
@@ -134,3 +134,35 @@ NEXT_PUBLIC_API_URL=http://localhost:3000   # your backend PORT
 | `Invalid email or password` (401) | Generic by design — also returned for locked/disabled/nonexistent accounts |
 | `403` on `/rbac-admin/*` | Account lacks `manage:User` — assign the role |
 | `login lockout is INACTIVE` WARN | No `REDIS_URL` — per-account lockout off, IP rate-limit only (fine for dev) |
+
+## Appendix — the exact setup used for this project
+
+Reference for what a completed setup looks like (backend on 8080 because the
+Next.js client already owned 3000):
+
+- **Containers:** `nest-auth-postgres` (`postgres:16`, `localhost:5432`, user/
+  password/db `postgres/postgres/auth`), `nest-auth-redis` (`redis:8`,
+  `localhost:6379`, no password)
+- **Migrations** applied in order via `docker exec … psql … -f - < file`,
+  then `pnpm seed:rbac` (baseline: 3 roles, 8 permissions)
+- **`.env` highlights:** `PORT=8080`, `AUTH_STRATEGY=jwt-stateless`,
+  `RBAC_STRATEGY=db-live`, `DB_PROVIDER=prisma`, `JWT_ALGORITHM=HS256`,
+  `REDIS_URL=redis://localhost:6379`,
+  `CORS_ORIGINS=http://localhost:3000,http://localhost:3001`
+- **Client** (`../client`): runs on `:3000` with
+  `NEXT_PUBLIC_API_URL=http://localhost:8080` in `client/.env.local`
+- **DB was once fully truncated** (`TRUNCATE … CASCADE` on all 6 tables) and
+  restored with `pnpm seed:rbac` — the supported way back to a working state
+
+Two real bugs found and fixed during this setup (new clones already have the
+fixes, documented here so the symptoms are searchable):
+
+1. **`PORT` in `.env` was silently ignored** — `@nestjs/config` only writes
+   schema-declared keys back to `process.env`, and `PORT` wasn't declared, so
+   the server always fell back to 3000. Fixed by declaring
+   `PORT: z.coerce.number().int().min(1).max(65535).default(3000)` in
+   `src/config/env.schema.ts` (+ tests in `env.schema.spec.ts`).
+2. **Browser `DELETE` calls failed CORS** while `POST` worked — the CORS
+   plugin's default preflight answer allowed only `GET,HEAD,POST`, blocking
+   the API's own detach/delete routes. Fixed with an explicit `methods` list
+   in `registerCors` (`src/main.ts`).

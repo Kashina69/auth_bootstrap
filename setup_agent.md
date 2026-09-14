@@ -85,9 +85,9 @@ Phase 2 until answered:
    `DB_PROVIDER=mongoose`.
 5. `pnpm seed:rbac` (if user agreed) — expect `baseline ready: N
    permissions, M roles`.
-6. Boot: `pnpm start:dev` (prefix `PORT=<n>` in the shell if the port came
-   from anywhere but validated env). Expect `HTTP server listening on port
-   <PORT>`. Leave THEIR foreground process to them — verify with your own
+6. Boot: `pnpm start:dev`. `PORT` in `.env` is honored (schema-validated);
+   a shell `PORT=<n>` prefix overrides it per-run. Expect `HTTP server
+   listening on port <PORT>`. Leave THEIR foreground process to them — verify with your own
    temporary instance or curl against theirs, then clean up anything you
    started temporarily so ports are free.
 7. Smoke test and read the bodies, don't just check status codes:
