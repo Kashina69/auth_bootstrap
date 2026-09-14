@@ -57,4 +57,14 @@ describe('validateEnv', () => {
       /refusing to start/,
     );
   });
+
+  it('defaults PORT to 3000 and coerces a string port from .env', () => {
+    expect(validateEnv(RS256_BASE).PORT).toBe(3000);
+    expect(validateEnv({ ...RS256_BASE, PORT: '8080' }).PORT).toBe(8080);
+  });
+
+  it('refuses an out-of-range or non-numeric PORT', () => {
+    expect(() => validateEnv({ ...RS256_BASE, PORT: '99999' })).toThrow(/refusing to start/);
+    expect(() => validateEnv({ ...RS256_BASE, PORT: 'not-a-port' })).toThrow(/refusing to start/);
+  });
 });

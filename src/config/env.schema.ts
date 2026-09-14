@@ -1,8 +1,13 @@
 import { z } from 'zod';
+import { DEFAULT_PORT } from './constants.js';
 
 /**
- * Verbatim from implementation.spec.md §8, with one frozen change: DB_PROVIDER lists
- * Mongoose in place of TypeORM (CONTRACTS.md §7, MEMORY.md kickoff decision).
+ * Verbatim from implementation.spec.md §8, with two frozen changes: DB_PROVIDER lists
+ * Mongoose in place of TypeORM (CONTRACTS.md §7, MEMORY.md kickoff decision), and PORT
+ * is declared even though the spec's table omits it. The declaration matters: `main.ts`
+ * reads `process.env.PORT`, and `@nestjs/config` only writes the *validated* keys back
+ * to `process.env` — an undeclared PORT in `.env` was silently stripped, so the file
+ * value never took effect and the server always fell back to the default.
  * Cross-field rules live in superRefine so a missing secret is a boot failure, never a
  * silent insecure fallback.
  */
@@ -19,6 +24,9 @@ export const envSchema = z
     JWT_SECRET: z.string().min(32).optional(),
     REDIS_URL: z.string().url().optional(),
     CORS_ORIGINS: z.string().optional(),
+    // Coerced because every env value arrives as a string; declared (rather than
+    // read raw in main.ts) so a `.env` value survives validation into process.env.
+    PORT: z.coerce.number().int().min(1).max(65535).default(DEFAULT_PORT),
   })
   .superRefine((val, ctx) => {
     if (val.JWT_ALGORITHM === 'RS256' && (!val.JWT_PRIVATE_KEY || !val.JWT_PUBLIC_KEY)) {
