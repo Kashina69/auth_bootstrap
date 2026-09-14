@@ -1,0 +1,22 @@
+{
+  // The boot smoke script must run the app the way production does — decorator metadata
+  // included. `tsx` transpiles with esbuild, which does NOT emit `design:paramtypes`, so
+  // Nest cannot resolve a constructor's injected types under it and the app dies with
+  // "Cannot read properties of undefined (reading 'REDIS_URL')" in LoginAttemptService.
+  // `pnpm seed:rbac` works around this with an explicit factory provider, but the smoke
+  // script boots the whole composition root, where that workaround does not scale.
+  //
+  // So it is compiled with the real compiler, exactly like `nest build`, into a scratch
+  // directory — scratch rather than `dist/` so it can run while other agents are working,
+  // and so the smoke never races the production build.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "./.smoke-dist",
+    // tsconfig.json points tsBuildInfoFile at a shared cache path; two configs writing it
+    // concurrently is a corruption hazard for no benefit here.
+    "incremental": false
+  },
+  "include": ["src", "test/smoke"],
+  "exclude": ["node_modules", "dist", ".smoke-dist", "**/*.spec.ts"]
+}

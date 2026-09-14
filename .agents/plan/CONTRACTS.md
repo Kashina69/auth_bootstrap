@@ -94,6 +94,24 @@ export interface IAuthorizationProvider {
 Every ORM adapter (Prisma, Drizzle, Sequelize, Mongoose) implements these verbatim and
 normalizes "not found" to `null` (never an ORM-specific exception).
 
+> **Exception — email case handling (item S10), confirmed by the Wave 9 contract suite.**
+> The four adapters do **not** behave identically here, and the contract suite pins the
+> exact-match rule the majority implements rather than pretending otherwise. Measured against
+> all four real databases, creating `S10-Mixed-Case@Example.COM`:
+>
+> | provider | stored | `findByEmail` exact case | `findByEmail` lowercased |
+> |---|---|---|---|
+> | prisma / drizzle / sequelize | as given | found | `null` |
+> | mongoose | `trim()`ed + lowercased | found | found |
+>
+> Mongoose normalizes on write *and* on lookup; the other three match byte-for-byte. This is
+> currently invisible in the app because the email is lowercased at the DTO/service boundary
+> before any repository sees it — so the divergence is reachable only by a caller that bypasses
+> that boundary. Recorded as a deliberate exception, not a fixed defect: closing it means
+> changing three adapters' write paths, which is a behaviour change to production persistence
+> and out of scope for the test wave. **Follow-up:** normalize in all four, or move
+> normalization explicitly to the boundary and document *that* as the contract.
+
 ```ts
 export interface UserRepository {
   findById(id: string): Promise<User | null>;
@@ -364,3 +382,5 @@ Both are self-introspection routes: they answer only about the caller, and take 
 | 2026-09-14 | §7 env schema gained an **optional** `CORS_ORIGINS` (comma-separated). Additive only — the frozen strategy/provider enums are unchanged, and leaving it unset must keep booting (CORS stays deny-all) | orchestrator |
 | 2026-09-14 | Added §11 — the `modules/auth/` surface, promoting the Wave 5 service signatures that were frozen but never written down, plus Wave 8's `AuthzService`, `CheckPermissionDto`, and the `GET /auth/me` / `POST /authz/check` routes (REST + GraphQL). **Purely additive** — §1–§10 are unchanged, and no frozen interface was touched | orchestrator |
 | 2026-09-14 | `SessionRedisAuthStrategy.logout` now interprets a **request-shaped** `sessionRef` as well as the opaque session id. No signature change: `IAuthStrategy.logout(userId, sessionRef: unknown)` is unchanged, and §3 already states the strategy interprets its own transport. Fixes open item S1, where the controller passed the request and the strategy rejected it as non-string, so the session was never invalidated. Contained in `auth-strategies/session-redis/` | orchestrator |
+| 2026-09-14 | §5 gains a written **exception** for email case handling (item S10), with the measured four-adapter table. No interface changed — the contract suite pins exact-match, which is what three of the four adapters implement. Documentation of a known divergence, not a new rule | orchestrator |
+| 2026-09-14 | **No interface change**, but the schema §5 sits on was corrected: migration `20260914000001_timestamptz_and_column_defaults` adds DB-side defaults (`gen_random_uuid()`, `now()`) on every `id` and on `users/roles.updated_at`, and moves every timestamp to `TIMESTAMPTZ(3)`. `schema.prisma` is annotated `@db.Timestamptz(3)` to match. Fixes S17 (`DB_PROVIDER=drizzle` could not insert) and S18 (zoneless timestamps parsed as local time by node-pg). Repository signatures are untouched; entity `Date` fields are unchanged | orchestrator |

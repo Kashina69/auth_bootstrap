@@ -47,10 +47,30 @@ export class SessionRedisAuthStrategy implements IAuthStrategy {
 
   async refresh(refreshInput: unknown, meta: RequestMeta): Promise<AuthResult> {
     const sessionId = requireSessionId(refreshInput);
-    const record = await readSession(this.redis, sessionId);
-    if (!record) throw invalidSession();
-    await extendSession(this.redis, sessionId);
-    return toAuthResult({ sessionId, record: refreshDeviceAndExpiry(record, meta) });
+    return this.asUnauthenticatedOnRedisFailure(async () => {
+      const record = await readSession(this.redis, sessionId);
+      if (!record) throw invalidSession();
+      await extendSession(this.redis, sessionId);
+      return toAuthResult({ sessionId, record: refreshDeviceAndExpiry(record, meta) });
+    });
+  }
+
+  /**
+   * A Redis outage on this path is an unauthenticated caller — a clean 401 — not a raw
+   * ioredis error surfacing through the exception filter as a 500. This is the same rule
+   * `validateRequest` already follows, and the two paths must agree: a dead Redis cannot mean
+   * "you are logged out" on every guarded route while meaning "the server broke" on refresh.
+   *
+   * An already-`UnauthorizedException` is re-thrown untouched, so a genuinely invalid or
+   * expired credential keeps its own message rather than being relabelled.
+   */
+  private async asUnauthenticatedOnRedisFailure<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof UnauthorizedException) throw error;
+      throw invalidSession();
+    }
   }
 
   async logout(userId: string, sessionRef: unknown): Promise<void> {

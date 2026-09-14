@@ -1,0 +1,66 @@
+# Real services for the contract and integration suites (TEST-PLAN.md §5 Wave 0 item 3).
+#
+# Non-default host ports on purpose: a developer's own Postgres/Redis/Mongo on the standard
+# ports is left alone, and nothing here can be mistaken for the app's real dependencies.
+#
+# Mongo is here because DB_PROVIDER=mongoose dials a `mongodb://` URL — the four ORM adapters
+# do not all speak Postgres, and a contract suite that cannot run one of its four providers
+# is not a contract suite.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+      # One database per consumer: the contract suite and the integration suite run in
+      # separate vitest processes and must not truncate each other's rows.
+      POSTGRES_MULTIPLE_DATABASES: auth_contract,auth_integration
+    ports:
+      - '55432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U auth -d auth_contract']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  # Creates the second database; the postgres image only honours POSTGRES_DB, not a list.
+  postgres-init:
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        for db in auth_contract auth_integration; do
+          psql -h postgres -U auth -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='$$db'" \
+            | grep -q 1 || createdb -h postgres -U auth "$$db"
+        done
+    environment:
+      PGPASSWORD: auth
+
+  redis:
+    image: redis:8
+    ports:
+      - '56379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mongo:
+    image: mongo:8
+    ports:
+      - '57017:27017'
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      - /data/db

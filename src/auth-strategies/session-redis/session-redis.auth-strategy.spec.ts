@@ -158,6 +158,35 @@ describe('SessionRedisAuthStrategy', () => {
 
       await expect(createStrategy(redis).validateRequest(req)).resolves.toBeNull();
     });
+
+    /**
+     * An empty cookie must not reach Redis at all. The gate is `if (!sessionId) return null`,
+     * and the property is asserted as "no lookup happened" rather than "the result was null":
+     * a null result is also what a lookup-for-nothing produces, so asserting on the result
+     * could not tell the two apart, while asserting on the lookup fails the moment the gate is
+     * removed. `sha256('')` is a fixed key, so a missing gate would let an empty cookie resolve
+     * to whatever occupies it.
+     */
+    it('performs no session lookup for an empty cookie, nor for a missing one', async () => {
+      const redis = createFakeRedis();
+      const lookups: string[] = [];
+      redis.get = (key: string) => {
+        lookups.push(key);
+        return Promise.resolve(null);
+      };
+      // Built by hand: `requestWithCookie('')` is falsy and so yields NO cookie header at all,
+      // which is the sibling case below, not this one. "Present but empty" is the case that
+      // matters — `sid=` parses to `''`, and `''` is exactly what a naive `sha256('')` lookup
+      // would turn into a valid key.
+      const emptyCookie = {
+        headers: { cookie: `${SESSION_COOKIE_NAME}=` },
+      } as unknown as FastifyRequest;
+
+      await expect(createStrategy(redis).validateRequest(emptyCookie)).resolves.toBeNull();
+      await expect(createStrategy(redis).validateRequest(requestWithCookie())).resolves.toBeNull();
+
+      expect(lookups).toEqual([]);
+    });
   });
 
   describe('refresh', () => {

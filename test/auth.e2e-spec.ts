@@ -1,176 +1,23 @@
-import { ValidationPipe } from '@nestjs/common';
-import { FastifyAdapter, type NestFastifyApplication } from '@nestjs/platform-fastify';
-import { Test } from '@nestjs/testing';
-import { ThrottlerStorage } from '@nestjs/throttler';
-import type { Redis } from 'ioredis';
+import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createInMemoryStore, seedBaselineRbac, type InMemoryStore } from './support/in-memory-repositories.js';
 import {
-  PERMISSION_REPOSITORY,
-  REFRESH_TOKEN_REPOSITORY,
-  ROLE_REPOSITORY,
-  USER_REPOSITORY,
-} from '../src/common/constants.js';
-import { HttpExceptionFilter } from '../src/common/filters/http-exception.filter.js';
-import { LoggingInterceptor } from '../src/common/interceptors/logging.interceptor.js';
-import { TimeoutInterceptor } from '../src/common/interceptors/timeout.interceptor.js';
-import { TransformInterceptor } from '../src/common/interceptors/transform.interceptor.js';
-import { LoginAttemptService } from '../src/common/security/login-attempt.service.js';
-import { AppConfig } from '../src/config/app-config.service.js';
-import { AppModule } from '../src/app.module.js';
-import {
-  createInMemoryPermissionRepository,
-  createInMemoryRefreshTokenRepository,
-  createInMemoryRoleRepository,
-  createInMemoryStore,
-  createInMemoryUserRepository,
-  seedBaselineRbac,
-  type InMemoryStore,
-} from './support/in-memory-repositories.js';
-import {
-  createTestThrottlerStorage,
-  type ResettableThrottlerStorage,
-} from './support/test-throttler-storage.js';
+  authorize,
+  createTestApp,
+  PASSWORD,
+  STRATEGIES,
+  uniqueEmail,
+  type Session,
+} from './support/harness.js';
+import type { ResettableThrottlerStorage } from './support/test-throttler-storage.js';
 
 /**
- * The in-memory session store standing in for ioredis. `SessionRedisAuthStrategy` (and
- * `db-live`'s cache) would otherwise dial a real Redis, which no e2e run has. Only the
- * client implementation is substituted — the strategy's own logic is untouched.
+ * The REST half of the e2e suite. The app boot, the persistence substitution and the
+ * per-strategy credential live in `test/support/harness.ts`; the GraphQL half
+ * (`graphql.e2e-spec.ts`) shares them, which is what makes the REST-vs-GraphQL parity
+ * assertions in that file meaningful.
  */
-vi.mock('ioredis', () => {
-  class Redis {
-    private readonly entries = new Map<string, string>();
-    async get(key: string): Promise<string | null> {
-      return this.entries.get(key) ?? null;
-    }
-    async set(key: string, value: string): Promise<'OK'> {
-      this.entries.set(key, value);
-      return 'OK';
-    }
-    async expire(): Promise<number> {
-      return 1;
-    }
-    async del(key: string): Promise<number> {
-      return this.entries.delete(key) ? 1 : 0;
-    }
-  }
-  return { Redis, default: Redis };
-});
-
-/** plan.md §11 Phase 13: the same suite, run once per `AUTH_STRATEGY` value. */
-const STRATEGIES = ['jwt-stateless', 'session-redis'] as const;
-type AuthStrategy = (typeof STRATEGIES)[number];
-
-const PASSWORD = 'Passw0rd!23';
-
-/**
- * The store is shared by every test in a run (rebuilding the app per test would mean two app
- * boots per assertion), so each test that needs an account registers its own address rather
- * than depending on one a sibling test may already have created.
- */
-let emailCounter = 0;
-function uniqueEmail(): string {
-  emailCounter += 1;
-  return `user${emailCounter}@example.com`;
-}
-
-/** What `register`/`login` hand back — the credential differs per strategy, nothing else does. */
-interface Session {
-  accessToken?: string;
-  refreshToken?: string;
-}
-
-/**
- * Applies the strategy's own credential to a request. This is the only place the two runs
- * diverge: `jwt-stateless` carries a bearer access token, `session-redis` an opaque session
- * id in its cookie. Every assertion below is written once and holds for both.
- */
-function authorize(req: request.Test, session: Session, strategy: AuthStrategy): request.Test {
-  return strategy === 'session-redis'
-    ? req.set('Cookie', `sid=${encodeURIComponent(session.refreshToken ?? '')}`)
-    : req.set('Authorization', `Bearer ${session.accessToken}`);
-}
-
-/**
- * Boots the real `AppModule` with only the persistence boundary replaced, and re-applies the
- * global pipe/interceptors/filter `main.ts` installs — without them the suite would test a
- * surface no client ever talks to.
- */
-async function createApp(
-  strategy: AuthStrategy,
-  store: InMemoryStore,
-): Promise<{ app: NestFastifyApplication; throttler: ResettableThrottlerStorage }> {
-  const configRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-  const realConfig = configRef.get(AppConfig);
-  const strategyConfig = new Proxy(realConfig, {
-    get(target, property) {
-      if (property === 'AUTH_STRATEGY') return strategy;
-      const value = Reflect.get(target, property, target);
-      return typeof value === 'function' ? value.bind(target) : value;
-    },
-  });
-  await configRef.close();
-
-  const throttler = createTestThrottlerStorage();
-
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
-    .overrideProvider(AppConfig)
-    .useValue(strategyConfig)
-    .overrideProvider(USER_REPOSITORY)
-    .useValue(createInMemoryUserRepository(store))
-    .overrideProvider(ROLE_REPOSITORY)
-    .useValue(createInMemoryRoleRepository(store))
-    .overrideProvider(PERMISSION_REPOSITORY)
-    .useValue(createInMemoryPermissionRepository(store))
-    .overrideProvider(REFRESH_TOKEN_REPOSITORY)
-    .useValue(createInMemoryRefreshTokenRepository(store))
-    .overrideProvider(ThrottlerStorage)
-    .useValue(throttler)
-    // `LoginAttemptService` builds its own client (neither strategy module exports
-    // `REDIS_CLIENT`), so it is handed one through the seam its doc comment names for specs.
-    .overrideProvider(LoginAttemptService)
-    .useValue(new InMemoryLoginAttemptService(strategyConfig))
-    .compile();
-
-  const app = moduleRef.createNestApplication<NestFastifyApplication>(new FastifyAdapter());
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
-  app.useGlobalInterceptors(
-    app.get(LoggingInterceptor),
-    app.get(TimeoutInterceptor),
-    app.get(TransformInterceptor),
-  );
-  app.useGlobalFilters(app.get(HttpExceptionFilter));
-  await app.init();
-  await app.getHttpAdapter().getInstance().ready();
-  return { app, throttler };
-}
-
-/**
- * `LoginAttemptService`'s own in-memory Redis, so the suite never dials 127.0.0.1:6379 while
- * the lockout counter still behaves like the real thing (a failing login still counts).
- */
-class InMemoryLoginAttemptService extends LoginAttemptService {
-  protected override createClient(): Redis {
-    const entries = new Map<string, string>();
-    return {
-      async incr(key: string) {
-        const next = Number(entries.get(key) ?? 0) + 1;
-        entries.set(key, String(next));
-        return next;
-      },
-      async expire() {
-        return 1;
-      },
-      async get(key: string) {
-        return entries.get(key) ?? null;
-      },
-      async del(key: string) {
-        return entries.delete(key) ? 1 : 0;
-      },
-    } as unknown as Redis;
-  }
-}
-
 describe.each(STRATEGIES)('auth e2e — AUTH_STRATEGY=%s', (strategy) => {
   let app: NestFastifyApplication;
   let store: InMemoryStore;
@@ -179,7 +26,7 @@ describe.each(STRATEGIES)('auth e2e — AUTH_STRATEGY=%s', (strategy) => {
   beforeAll(async () => {
     store = createInMemoryStore();
     seedBaselineRbac(store);
-    ({ app, throttler } = await createApp(strategy, store));
+    ({ app, throttler } = await createTestApp(strategy, store));
   });
 
   beforeEach(() => {

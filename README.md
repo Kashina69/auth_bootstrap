@@ -102,8 +102,14 @@ src/
 | `pnpm start:dev` | Watch-mode dev server |
 | `pnpm build` / `pnpm start` | Production build / run |
 | `pnpm seed:rbac` | Idempotent baseline seed (3 roles, 8 permissions) |
-| `pnpm test` | Unit suite (vitest, 17 files / 142 tests) |
-| `pnpm test:e2e` | End-to-end suite (42 tests — the same spec file run once per `AUTH_STRATEGY`) |
+| `pnpm test` | Unit suite (29 files / 259 tests) |
+| `pnpm test:contract` | Adapter contract suite — one shared contract run against **all four** ORMs (4 files / 108 tests). Needs `pnpm test:services:up`. |
+| `pnpm test:integration` | Live-service suite — real Redis + real Postgres (6 files / 46 tests + 2 quarantined). Needs `pnpm test:services:up`. |
+| `pnpm test:e2e` | End-to-end suite — REST **and** GraphQL, the same spec files run once per `AUTH_STRATEGY` (82 tests + 2 quarantined) |
+| `pnpm test:smoke` | Boot smoke — boots the real `AppModule` over real Postgres/Redis and asserts on live HTTP responses. Needs `pnpm test:services:up`. |
+| `pnpm test:cov` | Unit suite with coverage; enforces the per-directory thresholds in `vitest.coverage.ts` |
+| `pnpm test:services:up` / `down` | Start / stop the Docker stack the contract + integration suites need (Postgres 55432, Redis 56379, Mongo 57017) |
+| `pnpm test:all` | Every suite in sequence |
 | `pnpm lint` | oxlint |
 
 ## Known limitations
@@ -118,16 +124,58 @@ src/
 - The Next.js client is bearer-only (`api.ts` never sets
   `credentials: 'include'`), so it cannot use the `session-redis` cookie
   transport.
-- The e2e suite replicates `main.ts`'s global setup by hand, so a new global
-  enhancer added there would not be covered until the spec is updated.
+- ~~The e2e suite replicates `main.ts`'s global setup by hand.~~ **Fixed (Wave 9):** both now
+  call `configureApp()` from `src/configure-app.ts`, so a new global enhancer is covered by the
+  e2e suite the moment it is added. This also brought the `session-redis` CSRF registration
+  under test for the first time.
+- **`DB_PROVIDER=drizzle` could not insert against the migrated schema.** *(Wave 9 finding,
+  fixed in Wave 10.)* The migrations declared no column default on any `id` or on
+  `users/roles.updated_at`, and Drizzle emits `DEFAULT` for both — so every insert died on a
+  not-null violation. They were also `TIMESTAMP(3)` without a zone while Drizzle and Sequelize
+  both declare `timestamptz`, and node-pg parses a zoneless timestamp as *local* time, shifting
+  the instant on any non-UTC host. Migration
+  `20260914000001_timestamptz_and_column_defaults` adds the DB-side defaults and moves every
+  timestamp to `TIMESTAMPTZ(3)`; `schema.prisma` is annotated to match. **The test-time schema
+  patch that used to hide this is deleted** — the contract suite now runs against the schema
+  that ships.
+- **`refresh` used to answer a dead Redis with a 500** while every other guarded route answered
+  a clean 401. *Fixed in Wave 10* — both paths now fail closed identically (S19).
+- **A soft-deleted account still reserves its email** (S20), and **deactivating an account does
+  not revoke its live session** (S21). Both are pinned by tests and open deliberately: each fix
+  is a product decision (should an address become reusable after deletion; should a
+  deactivation revoke sessions and at what cost) rather than a bug to patch.
+- `app.close()` now releases its connections (`DatabaseLifecycle`, `RedisClientLifecycle`,
+  `LoginAttemptService.onModuleDestroy`). Before Wave 10 it released nothing, so the process
+  never exited after shutdown — the boot smoke script needed a forced `process.exit`, which is
+  now gone.
 - `deletePermission` doesn't fan out cache invalidation under `db-live`
   (up to 5s stale, open item S9).
 
 ## Current state + how to resume
 
-**All 8 build waves and all 13 phases of the plan are complete.** Gate at HEAD:
-`pnpm build` 0 · `pnpm test` 17 files / 142 passed · `pnpm test:e2e` 42 passed ·
-`tsc --noEmit` 0 · `oxlint` 0 · boots, with `/auth/me` and `/authz/check` probed live.
+**All 8 build waves and all 13 phases of the plan are complete.** The test suite was then built
+out per `TEST-PLAN.md` (Wave 9), and the defects it found were fixed (Wave 10). Gate at HEAD:
+
+```
+pnpm build                               0
+pnpm exec tsc --noEmit -p tsconfig.json  0
+pnpm exec oxlint src/ test/              0
+pnpm test                                29 files / 259 passed
+pnpm test:contract                        4 files / 108 passed
+pnpm test:integration                     6 files /  46 passed  (+2 quarantined)
+pnpm test:e2e                             2 files /  82 passed  (+2 quarantined)
+pnpm test:smoke                           16/16, exits unaided
+pnpm test:cov                             0 — per-directory thresholds met
+```
+
+Plus 4 deliberately quarantined tests (`it.fails`) tracking S2, S13, S20 and S21 — each written
+against the *intended* behaviour so it flips green when fixed. A quarantine that fails loudly is
+a tracked hole, not a pass.
+
+Before Wave 9, `DB_PROVIDER=drizzle|sequelize|mongoose` and the GraphQL surface were never
+executed by any test. They are now — and doing so surfaced real defects: the Drizzle adapter
+could not insert at all, timestamps were zoneless, `refresh` mishandled a Redis outage, and
+nothing released connections on shutdown. All four are fixed. See `WAVE-LOG.md` Waves 9–10.
 
 Everything a resuming chat needs is in **`.agents/plan/`** — read them in this order:
 

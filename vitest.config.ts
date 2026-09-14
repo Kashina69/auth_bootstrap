@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config';
 import tsconfigPaths from 'vite-tsconfig-paths';
+import { coverageConfig } from './vitest.coverage.js';
 
 export default defineConfig({
   // Resolves the path aliases declared in tsconfig.json, including the ones
@@ -9,6 +10,7 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.spec.ts'],
+    coverage: coverageConfig,
     // Any spec that compiles AppModule boots through the zod env schema, which refuses
     // to start without valid secrets — so tests get a throwaway HS256 config.
     env: {

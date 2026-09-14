@@ -695,3 +695,148 @@ converts context you already hold into a hand-off seam.
 
 Two anti-pattern rows added: "one agent per file / per implementation of one interface" and
 "parallelizing without clearing shared files first".
+
+---
+
+### Wave 9 — the test suite, built per TEST-PLAN.md (2026-09-14)
+
+**Shape:** orchestrator-only Wave 0, then **four section agents dispatched simultaneously**
+(A DB contract, B GraphQL e2e, C integration, D unit gaps), then one diff-scoped verifier. One
+agent per *section*, never per file — no two agents shared a file, and the shared boundaries
+(`configureApp`, the test harness, both new configs, `package.json`, Docker) were cleared by the
+orchestrator first, which is what made the parallelism safe.
+
+**Gate:** `pnpm test` **29 files / 256 passed** (was 17/142) · `test:contract` 4/108 ·
+`test:integration` 6/46 (+2 expected fail) · `test:e2e` 2/82 (+2 expected fail) ·
+`test:smoke` 16/16 exit 0 · `tsc` 0 · `oxlint` 0 · `build` 0 · `node dist/main.js` boots and
+serves (`/auth/register` → 201, `/auth/me` → 401).
+
+**The test suite went from five kinds of test to six.** Before this wave the repo had unit and
+REST e2e. It now also has an adapter contract suite (one shared contract × four ORMs), a
+live-service integration suite (real Redis + real Postgres), a GraphQL e2e suite with REST
+parity assertions, a boot smoke script, and enforced coverage thresholds.
+
+#### Decisions locked this wave
+
+1. **Coverage is configured with an explicit `include`, and it is a gap-finder, not a gate on
+   correctness.** Without `include`, vitest reports only files some test imported — the suite
+   read **91%** while `src/database/**` was at **0% and absent from the table**. With
+   `include: ['src/**/*.ts']` the honest figure is **40%**. The Wave 6 `isSystem` defect sat
+   behind a fully-covered, fully-green file, so no percentage would have caught it.
+2. **Thresholds are ratcheted floors on the security surface only** (rbac-core 100%,
+   auth-strategies, rbac-strategies, common/security, common/guards), measured at this baseline
+   and rounded down. `src/database/repositories/**` deliberately has **no** threshold — the
+   contract suite covers those behaviourally, which is stronger than line coverage.
+3. **S10 is closed as a written exception, not a fix.** The four adapters genuinely disagree on
+   email case; the app lowercases at the boundary so it is masked in practice. Fixing it means
+   changing three adapters' write paths — a production behaviour change, out of scope for a test
+   wave. Measured table now lives in `CONTRACTS.md` §5.
+4. **`test:smoke` compiles with `tsc` and runs under `node`, never `tsx`.** Measured:
+   `Reflect.getMetadata('design:paramtypes', LoginAttemptService)` is `undefined` under `tsx`
+   and `[Function AppConfig]` under vitest. esbuild emits no decorator metadata, so Nest cannot
+   resolve constructor injection and the app dies reading `REDIS_URL` off `undefined`. It
+   compiles into `.smoke-dist/` (scratch), never `dist/`, so it cannot race `pnpm build`.
+5. **Killed tests are quarantined with `it.fails` against the *intended* behaviour**, with a
+   comment naming the S-number. Four exist (S2, S13 ×2, S21). A red test with a tracked number
+   beats a green suite with a blind spot — and pinning the *broken* behaviour as correct is the
+   exact Wave 6 `isSystem` anti-pattern.
+
+#### The findings that matter
+
+- **`DB_PROVIDER=drizzle` cannot insert against the migrated schema (S17, High).**
+  `drizzle/schema.ts` declares `.defaultRandom()`/`.defaultNow()` and inserts `DEFAULT`; the
+  migrations declare neither. 22 of 27 Drizzle contract tests died on
+  `null value in column "id" violates not-null constraint`. **The contract suite currently
+  passes for Drizzle because its harness reconciles the schema — i.e. against a schema
+  production does not have.** That caveat is documented in the harness; the real fix is a
+  migration or a schema change, both `src/` work.
+- **Migration/ORM timestamp drift (S18).** Migrations use `TIMESTAMP(3)` without zone;
+  Drizzle/Sequelize declare `timestamptz`. node-pg parses a zoneless timestamp as local, so on
+  this non-UTC host Sequelize returned `expiresAt` shifted by the IST offset and Prisma did not.
+  Silent and host-dependent.
+- **A security test that was false comfort (N7).** Removing `algorithms` from `verifyOptions()`
+  did NOT fail the HS256-forged-with-the-public-key test — jsonwebtoken v9 rejects an HMAC token
+  itself when the key material is a PEM key. Agent D added an HS384-signed-with-the-symmetric-
+  secret assertion, which *does* fail when the pin is removed. **Lesson: an alg-confusion test
+  is not evidence that the `algorithms` pin works.**
+- **S22 — `app.close()` leaks handles.** Nothing implements `onModuleDestroy`, so the Prisma
+  pool and the Redis client `LoginAttemptService` opens outlive the app; the smoke process hangs
+  open after all 16 checks pass (hence its explicit `process.exit`). `main.ts` calls
+  `enableShutdownHooks()`, so a real SIGTERM tears down with those connections open.
+
+#### Orchestrator errors this wave (both mine)
+
+1. **A probe that could not fail, again (§9a's third instance in this project).** The first
+   smoke asserted route mapping with `printRoutes().includes('/auth/register')` — a
+   human-formatted tree that does not contain those paths as substrings. It reported "unmapped"
+   for routes that demonstrably answered requests. Replaced with the router's `hasRoute()`.
+2. **A vacuous mutation-check.** I "broke" the smoke by pointing `DATABASE_URL` at a dead port,
+   but the script hardcodes its own DB URL, so the mutation changed nothing. Redone against the
+   transform envelope, which genuinely fails 7 checks.
+
+#### Process note — the interruption, and why resumption beat re-dispatch
+
+The four agents were stopped mid-flight by a session end. On restart, `git status` showed A's
+shared contract + factories with **no specs** (`test:contract` matched zero files), B's spec
+half-tuned, C's section entirely absent, D's first four specs landed. **All four were resumed
+from their saved transcripts** via `SendMessage` rather than re-dispatched fresh — they kept
+their orientation, which is exactly the tax `orchestrate-skill.md` §1 measures. Everything in
+this entry is the state after resumption.
+
+**Corollary for the ledger:** a stopped agent is not a lost agent. Check the disk first — the
+partial work defines what the follow-up message should say, and "continue from X, Y is missing"
+is far cheaper than a cold re-dispatch.
+
+---
+
+### Wave 10 — production fixes the test suite earned (2026-09-14)
+
+The Wave 9 suite found defects that eight waves of green builds had hidden. Wave 10 fixes the
+ones worth fixing. **These are deliberate production changes** — the first runtime behaviour
+change since Wave 8.
+
+#### Decisions locked
+
+1. **The migrated schema was the wrong one, and it was fixed in the migration — not in the
+   test harness.** `DB_PROVIDER=drizzle` could not insert a single row (no DB default on any
+   `id`, or on `users/roles.updated_at`, so Drizzle's `DEFAULT` was NULL). And every timestamp
+   was `TIMESTAMP(3)` — zoneless — which node-pg parses as **local** time, while Drizzle and
+   Sequelize both declare `timestamptz` and Prisma reads UTC. The migration now carries
+   `gen_random_uuid()` / `now()` defaults and `TIMESTAMPTZ(3)`, and `schema.prisma` is
+   annotated `@db.Timestamptz(3)` so it cannot drift back.
+   **The deleted `alignSchemaWithAdapters` matters more than the migration.** The contract suite
+   was passing for Drizzle only because a test-time patch rewrote the schema to match Drizzle's
+   declarations — it proved the adapters agreed given a schema production did not have. A suite
+   that patches its own subject is decoration; this was `orchestrate-skill.md` §9a in test form.
+2. **`refresh` was made to agree with `validateRequest` about a dead Redis (S19).** It now
+   answers a clean 401 instead of a raw ioredis error through the exception filter.
+   **Consequence worth remembering:** an integration test had *pinned the bug* as expected
+   behaviour (`surfaces an unreachable Redis from refresh as a driver error, not a clean 401`).
+   Fixing the code required inverting the test. A test written to document a defect becomes a
+   test that defends it — the Wave 6 `isSystem` pattern again.
+3. **`instanceof` is wrong for cross-module narrowing.** `DatabaseLifecycle` closes whichever
+   client `DB_PROVIDER` built, and the first implementation used `instanceof PrismaClient`. The
+   same package resolved through two registries yields two constructors, so a valid
+   `PrismaClient` failed the check and fell through to the Drizzle branch — breaking the e2e
+   suite with `Cannot read properties of undefined (reading 'end')`. It now dispatches on the
+   handle's own shape (`$client.end` / `$disconnect` / `close` + `readyState`).
+4. **The smoke script's forced `process.exit` was removed, and that removal is the evidence.**
+   It existed because `app.close()` released nothing and the process hung open forever after
+   all 16 checks passed. Three lifecycle hooks later, the script exits unaided in ~13s. If it
+   ever hangs again, teardown has regressed — the comment in the file says so.
+
+#### The threshold did its job
+
+Adding the ioredis error listener and the teardown dropped `src/common/security/**` to 85.7%
+lines against the 96% floor, and `test:cov` **failed the build**. The response was to add three
+tests driving the real `createClient`/`onModuleDestroy` (every prior test in that file replaced
+`createClient` through the subclass seam, so the new code was unreachable), both mutation-
+checked — **not** to lower the floor. That is what a ratcheted threshold is for.
+
+#### Honest note on scope
+
+Two findings were left open on purpose, because fixing them is a product decision rather than a
+bug fix: **S20** (should a deleted account's email become reusable? needs a partial unique
+index) and **S21** (should deactivation revoke live sessions? the cheap fix defeats the session
+cache, and there is no deactivation endpoint to hook). Both stay pinned by tests and ledgered —
+an open item with a test is not the same as an unnoticed one.

@@ -20,7 +20,13 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
+    "test:e2e": "vitest run --config ./vitest.config.e2e.ts",
+    "test:contract": "vitest run --config ./vitest.config.contract.ts",
+    "test:integration": "vitest run --config ./vitest.config.integration.ts",
+    "test:smoke": "tsc -p tsconfig.smoke.json && node .smoke-dist/test/smoke/boot.smoke.js",
+    "test:services:up": "docker compose -f docker-compose.test.yml up -d --wait",
+    "test:services:down": "docker compose -f docker-compose.test.yml down -v",
+    "test:all": "pnpm test && pnpm test:contract && pnpm test:integration && pnpm test:e2e && pnpm test:smoke"
   },
   "dependencies": {
     "@apollo/server": "^5.5.1",

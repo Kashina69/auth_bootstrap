@@ -195,14 +195,43 @@ not "does this feel small".
 Run all of these yourself; they cost almost nothing in tokens versus an agent doing it:
 
 ```
+pnpm test:services:up                   # contract + integration + smoke need real services
 pnpm build                              # exit 0
 pnpm test                               # exact file/test counts, must not decrease
-pnpm test:e2e                           # exit 0 — the per-AUTH_STRATEGY suite (Wave 8)
+pnpm test:contract                      # exit 0 — one contract, all four ORMs (Wave 9)
+pnpm test:integration                   # exit 0 — real Redis + real Postgres (Wave 9)
+pnpm test:e2e                           # exit 0 — per-AUTH_STRATEGY, REST *and* GraphQL (Wave 9)
 pnpm exec tsc --noEmit -p tsconfig.json # exit 0 — NOT optional, see §8
 pnpm exec oxlint src/ test/             # exit 0
+pnpm test:cov                           # exit 0 — must meet vitest.coverage.ts thresholds
+pnpm test:smoke                         # boots + real requests + real assertions (Wave 9)
 node dist/main.js                       # boots, routes mapped, no throw
 # THEN execute real requests against the running app and assert on the responses.
 ```
+
+**`pnpm test:smoke` now does the boot + real-request step for you**, against the real
+`AppModule` over real Postgres and Redis: it asserts the routes map, and drives
+register → login → authenticated read → authorization allow/deny → logout → GraphQL over live
+HTTP, exiting non-zero on the first failure. It is independently mutation-checked — deleting
+the `{ data, meta }` envelope fails 7 of its 16 checks.
+
+**It must be run through `tsc`, not `tsx`.** esbuild (which `tsx` and vitest use) emits no
+`design:paramtypes` metadata, so Nest cannot resolve a constructor's injected types and the app
+dies on `LoginAttemptService` reading `REDIS_URL` off `undefined`. `tsx` is fine for the seed
+(which works around it with an explicit factory provider) and wrong for anything that boots the
+composition root. `test:smoke` therefore compiles via `tsconfig.smoke.json` into `.smoke-dist/`
+— a scratch dir, so it never races `pnpm build` on `dist/` when agents run concurrently.
+
+**It exits on its own, and that is itself a check.** Wave 10 gave the app real teardown hooks
+(`DatabaseLifecycle`, `RedisClientLifecycle`, `LoginAttemptService.onModuleDestroy`); before
+that, `app.close()` released nothing and the smoke needed a forced `process.exit` because the
+process hung open forever after passing. If `pnpm test:smoke` ever starts hanging, teardown has
+regressed — that is a real finding, not a flaky test.
+
+**Quarantined tests are expected output, not noise.** Four tests are deliberately `it.fails`
+(S2, S13, and two Wave 9 findings); they are written against the *intended* behaviour so they
+flip green when fixed. A suite reporting `N passed | M expected fail` is the documented shape —
+do not "fix" it by deleting or weakening them (§12).
 
 `tsc --noEmit` and the live-probe step are both load-bearing; the e2e suite is a *third*,
 weaker net — it substitutes the persistence boundary, so it proves the wiring and the HTTP

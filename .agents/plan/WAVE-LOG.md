@@ -357,3 +357,366 @@ under Wave 8. **No wave remains to dispatch.**
 | 6 | 2 build + 1 verifier + 1 fix | ≈ 353k |
 | 7 | 2 build + 2 fix | ≈ 339k |
 | 8 | **none — built inline** | **0** |
+
+---
+
+## Wave 9 — build the test suite per `TEST-PLAN.md` ✅ (2026-09-14)
+
+Executed `TEST-PLAN.md` end-to-end. **One orchestrator-only Wave 0, then four section agents
+dispatched simultaneously** (A: DB contract, B: GraphQL e2e, C: integration, D: unit gaps),
+then one diff-scoped adversarial verifier. The plan's granularity rule held: one agent per
+*section*, never per file — and no two agents shared a file.
+
+### Baseline, re-measured (not taken from the plan)
+
+```
+pnpm test      → 17 files / 142 tests
+pnpm test:e2e  →  1 file  /  42 tests
+```
+Both matched `TEST-PLAN.md` §1 exactly, so its gap analysis was trustworthy.
+
+### Gate at HEAD (all green, verbatim)
+
+```
+pnpm build                              0
+pnpm test                               29 files / 256 passed
+pnpm test:contract                       4 files / 108 passed
+pnpm test:integration                    6 files /  46 passed  (+2 expected fail)
+pnpm test:e2e                            2 files /  82 passed  (+2 expected fail)
+pnpm test:smoke                          16/16 checks, exit 0
+pnpm exec tsc --noEmit -p tsconfig.json  0
+pnpm exec oxlint src/ test/              0
+node dist/main.js                        boots; POST /auth/register → 201, GET /auth/me → 401
+```
+
+Unit count **142 → 256**. e2e **42 → 84 assertions** (the original 42 byte-identical, verified
+by diffing assertion lines against `git show HEAD:test/auth.e2e-spec.ts` — 40 `expect(` and
+21 `it(` before and after, unchanged; only machinery moved into the harness).
+
+### Wave 0 (orchestrator only — the shared boundaries, cleared before dispatch)
+
+| # | Delivered | Why it had to precede the agents |
+|---|---|---|
+| 1 | `src/configure-app.ts` — `configureApp(app)`; called by `main.ts` **and** the e2e harness | Two consumers, one file. Closes §3.5: a new global enhancer is now covered by e2e automatically, and the `session-redis` CSRF registration is under test for the first time |
+| 2 | `test/support/harness.ts` (`createTestApp`, `authorize`, `STRATEGIES`, `uniqueEmail`); `test/support/e2e-setup.ts` (the ioredis stand-in, via the e2e config's `setupFiles`) | Agents B and C both import it and must not edit it |
+| 3 | `docker-compose.test.yml` — Postgres 55432, Redis 56379, **Mongo 57017**; `test:services:up/down` | Shared infrastructure. **The plan's spec omitted Mongo** — see correction 1 below |
+| 4 | `vitest.config.contract.ts`, `vitest.config.integration.ts`, all `package.json` scripts | Otherwise A and C both edit `package.json` and both create a config — a guaranteed write race |
+| 5 | `vitest.coverage.ts` + ratcheted per-directory thresholds | One place to ratchet; mutation-checked (see below) |
+| 6 | `test/smoke/boot.smoke.ts` + `tsconfig.smoke.json` (orchestrator, unowned by any agent) | The gate's boot + real-request step (§4 kind 6) |
+
+### Three corrections to `TEST-PLAN.md`, all verified in source before dispatch
+
+1. **The plan's Docker spec was incomplete.** It lists Postgres + Redis only, but
+   `DB_PROVIDER=mongoose` dials `createMongooseClient(uri)` — a `mongodb://` URL. A contract
+   suite that cannot run one of its four providers is not a contract suite. Mongo added on
+   **57017**, and `MONGO_URL` is exported to the contract config.
+2. **§7.2 assumes a lockout env override that does not exist.** `LoginAttemptService` hardcodes
+   `LOCK_THRESHOLD = 10` and `WINDOW_SECONDS = 15 * 60` as module constants; there is no
+   test-only override. Agent C was told to assert the expiry is *armed* (Redis `TTL` ∈ (0, 900]
+   after the 10th failure — a real assertion that fails if `expire` was never called) rather
+   than wait out a 15-minute window. Recorded as an open item below.
+3. **`tsx` cannot boot this app.** esbuild — used by both `tsx` and vitest — emits no
+   `design:paramtypes` metadata under `tsx`, so Nest cannot resolve constructor injection and
+   the process dies on `LoginAttemptService` reading `REDIS_URL` off `undefined`. Measured
+   directly: `Reflect.getMetadata('design:paramtypes', LoginAttemptService)` is `undefined`
+   under `tsx` and `[Function AppConfig]` under vitest. The seed survives only because it
+   injects `AppConfig` through an explicit factory provider. **`test:smoke` therefore compiles
+   via `tsconfig.smoke.json` into `.smoke-dist/` and runs under `node`** — scratch dir, so it
+   never races `pnpm build` on `dist/` while agents run concurrently.
+
+### The coverage blind spot was worse than reported (§3.3)
+
+The existing config had **no `coverage.include`**, so vitest reported only files some test
+happened to import. It read **91% statements** while `src/database/**` — 16 repository
+implementations across four ORMs — sat at **0% and was simply absent from the table**. With
+`include: ['src/**/*.ts']` the honest number is **40%**. Coverage is now a gap-finder: the
+whole of `src/` is reported, and thresholds are set **only** on the five security-critical
+directories (§6), as floors measured at this baseline and rounded down.
+
+**Mutation-checked:** raising the `src/rbac-core/**` threshold to 101 makes `test:cov` emit
+`ERROR: Coverage for … does not meet "src/rbac-core/**" threshold (101%)` for all four metrics.
+The gate is load-bearing, not decorative.
+
+### Verified independently by the orchestrator (not taken from agent reports)
+
+- **The REST suite is unmodified.** 40 `expect(` / 21 `it(` before and after; the diff removes
+  only machinery that moved into `harness.ts`. DoD requires this and it holds.
+- **Soft-delete is load-bearing on real code.** Deleting `deletedAt: null` from the *production*
+  `prisma-user.repository.ts#findByEmail` fails exactly one contract test and nothing else
+  (107 passed), then passes again on restore. (Agent A mutated the test helper instead; this
+  mutates the adapter, which is the stronger check.)
+- **The boot smoke can actually fail.** Removing the `{ data, meta }` envelope from
+  `transform.interceptor.ts` fails 7 of its 16 checks and exits 1. The first version of the
+  smoke could *not* fail — see the orchestrator-error note below.
+- **The contract suite was not weakened per provider.** The shared contract has no
+  provider-conditional branches; the four specs are 4 lines each.
+- **S13's quarantine is honest.** `it.fails`, written against the *intended* behaviour
+  (`errors` undefined, `data.login.user.email` present), with a comment naming S13 and warning
+  against pinning the broken behaviour as correct.
+
+### New defects and divergences the suite exposed
+
+| # | Finding | Severity | Disposition |
+|---|---|---|---|
+| **N1** | **`DB_PROVIDER=drizzle` cannot insert against the migrated schema.** `drizzle/schema.ts` declares `.defaultRandom()` on ids and `.defaultNow()` on `updated_at` and inserts `DEFAULT`; the migrations declare neither (Prisma fills both client-side). Every Drizzle insert died on `null value in column "id" violates not-null constraint` — 22 of 27 tests | **High** — an advertised headline feature is broken | **OPEN.** Agent A's harness reconciles the schema (`alignSchemaWithAdapters`) so the adapter is *exercised*, which means Drizzle currently passes the contract against a schema production does not have. Fix is either defaults in a migration or removing them from the drizzle schema — a `src/` change, out of scope for a test wave |
+| **N2** | **Timestamp type drift.** Migrations declare `TIMESTAMP(3)` (no zone); `drizzle/schema.ts` declares `withTimezone: true` and Sequelize maps `DataTypes.DATE` → `timestamptz`. node-pg parses a zoneless timestamp as **local** time, so on this non-UTC host Sequelize returned `expiresAt` shifted by the IST offset and Prisma did not | **Medium** — silent, host-dependent data corruption | **OPEN**, recorded |
+| **N3** | **S10 is now measured, not a note.** Mongoose normalizes email on write *and* lookup; the other three match byte-for-byte (table in the agent report, reproduced below) | Low (masked in practice — the app lowercases at the boundary) | **CLOSED as a written exception** in `CONTRACTS.md` §5, with the measured table. Not fixed: it would change three adapters' write paths |
+| **N4** | **`refresh` does not fail closed on a Redis outage.** `validateRequest` catches; `refresh` does not, so an outage on the token-refresh path reaches the exception filter as a raw ioredis error (~500) instead of the clean 401 the guard path produces | Medium | **OPEN** — pinned by a test |
+| **N5** | **A soft-deleted account permanently reserves its email.** `users_email_key` is unconditional, so the address is still held; `assertEmailIsAvailable` uses `findByEmail` (which filters `deletedAt`), so re-registration reaches the raw unique violation as a Prisma error instead of a `ConflictException` | Medium | **OPEN** — pinned by a test |
+| **N6** | **Deactivating an account does not revoke its live session.** `validateRequest` returns the Redis snapshot unchanged — the blob still says `isActive: true`. Quarantined with `it.fails` | Medium | **OPEN** — quarantined, pending verifier |
+| **N7** | **The classic alg-confusion test was not load-bearing for the `algorithms` pin.** With `algorithms` removed from `verifyOptions()`, the HS256-forged-with-the-public-key test still passes — jsonwebtoken v9 rejects an HMAC token itself when the key material is a PEM key | Low-ish, but it means a security test was false comfort | **FIXED by agent D**: an HS384 token signed with the same symmetric secret is now asserted rejected, and *that* test fails when the pin is removed |
+| **N8** | **`@prisma/client` was not generated at HEAD** — nothing Prisma-based could run at all. Agent A ran `prisma generate` (idempotent). Any agent using the Prisma adapter needs this done once | — | **RESOLVED** |
+
+### Orchestrator errors this wave (both mine)
+
+1. **The first smoke script could not fail.** It asserted route mapping with
+   `printRoutes().includes('/auth/register')` — a human-formatted tree that does not contain
+   those paths as literal substrings. It reported "unmapped" for routes that demonstrably
+   answered requests, i.e. it measured its own parser, not the app (`orchestrate-skill.md` §9a,
+   third instance in this project). Replaced with the router's own `hasRoute({ method, url })`.
+2. **The first mutation-check of the smoke was vacuous.** I "broke" it by pointing
+   `DATABASE_URL` at a dead port — but the script hardcodes its own DB URL and overwrites the
+   env var, so the mutation changed nothing and the probe could not have detected it. Redone
+   properly against the transform envelope, which does bite.
+
+Also: my probe always sent `content-type: application/json` even with no body, which made
+`POST /auth/logout` fail DTO validation with a 400 that had nothing to do with logout. Fixed —
+and it is exactly the class of false alarm §9a warns about.
+
+### Process note — the session was interrupted
+
+The four section agents were stopped mid-flight by a session end. `git status` showed A's
+shared contract + 5 factories with **no specs** (so `test:contract` matched zero files), B's
+spec half-tuned, C's section absent entirely, D's first 4 specs landed. All four were **resumed
+from their saved transcripts** rather than re-dispatched fresh — they kept their orientation
+instead of re-paying the tax `orchestrate-skill.md` §1 measures. Everything above is the state
+after that resumption.
+
+### Token cost
+
+| Agent | Section | Tokens (resumed session) |
+|---|---|---|
+| A `db-contract-agent` | `test/contract/**` | 98.9k |
+| B `graphql-e2e-agent` | `test/graphql.e2e-spec.ts` | 95.7k |
+| C `integration-agent` | `test/integration/**` | 134.3k |
+| D `unit-gap-agent` | 12 new `*.spec.ts` | 105.3k |
+| verifier (diff-scoped) | whole wave diff | see below |
+
+Every section landed inside the plan's 40–100k target band or just over it (C at 134k, still
+well under the ~150k re-scope trigger), and no agent had to be subdivided.
+
+### Open items opened or changed by this wave
+
+| Id | Item | Status |
+|---|---|---|
+| S2 | Session cookie never attached | **Still OPEN**, now *regression-tracked* — `it.fails` in `test/integration/session-cookie-s2.integration-spec.ts`, verified red before quarantine, flips green when a caller attaches the cookie |
+| **S10** | Mongoose email normalization | **CLOSED** as a written exception in `CONTRACTS.md` §5 (measured table) |
+| **S13** | GraphQL `variables` never reach Apollo | **Still OPEN**, now *regression-tracked* — `it.fails` (2, one per strategy) with the raw failure text recorded |
+| **S16** | No test-only override for the lockout window; `LOCK_THRESHOLD`/`WINDOW_SECONDS` are hardcoded | NEW, Low — `TEST-PLAN.md` §7.2 assumes an override that does not exist |
+| **S17** | `DB_PROVIDER=drizzle` cannot insert against the migrated schema (N1) | NEW, **High** |
+| **S18** | Migration/ORM timestamp-type drift (N2) | NEW, Medium |
+| **S19** | `refresh` does not fail closed on a Redis outage (N4) | NEW, Medium |
+| **S20** | Soft-deleted account permanently reserves its email (N5) | NEW, Medium |
+| **S21** | Deactivating an account does not revoke its live session (N6) | NEW, Medium |
+| **S22** | `app.close()` does not release Prisma/Redis handles — nothing implements `onModuleDestroy`, so the process hangs open after the app is closed, and `main.ts`'s `enableShutdownHooks()` tears down with those connections still open | NEW, Low–Medium |
+
+### Still open from `TEST-PLAN.md`'s own definition of done
+
+- `MEMORY.md` updated with the new gate results and test files — **done**.
+- `orchestrate-skill.md` §7 updated to include the new commands — **done**.
+- `README.md` script table updated — **done**.
+- Wave 2 adversarial verifier — dispatched; its findings are appended in the next section.
+
+### Wave 2 verifier — findings and disposition
+
+One diff-scoped adversarial verifier, 146k tokens, 60 tool calls. It did real work: it
+reproduced S13 over a real socket (not supertest), proved the hash-at-rest assertion bites by
+inserting `raw-token-PLAINTEXT-PROBE` in a rolled-back transaction and reading it back verbatim,
+and independently re-confirmed S17/S18 against the unpatched `auth_integration` schema.
+
+**Confirmed sound (no action):**
+- **No mock-round-trip tests.** `grep -l "vi.fn|vi.mock|vi.spyOn"` over all 12 new unit specs,
+  `test/integration/**` and `test/contract/**` returns nothing. Every collaborator is a
+  hand-written fake and the assertions target the module under test.
+- **Hash-at-rest is load-bearing.** `repository-contract.ts:351-353` reads physical storage via
+  a separate raw `pg` client (`postgres-admin.ts:52-55`), not the repository's own report.
+- **N6/S21 is a REAL defect, not a misunderstanding** — so agent C's ledger entry stands.
+  `session-redis.auth-strategy.ts:68-79` returns `record.user` straight out of the Redis blob
+  and never consults the account row; `jwt-stateless.auth-strategy.ts:72` by contrast re-reads
+  the DB and throws on `!user.isActive`.
+- **All four quarantines assert INTENDED behaviour.** None pins a bug as correct.
+
+**Fixed as a result (all mutation-checked):**
+
+| # | Finding | Fix |
+|---|---|---|
+| V1 | **VACUOUS** — `session-store.spec.ts:75` used `not.toContain(sessionId)`, which is trivially true because every key is `session:<hash>`; it could not catch `session:<raw id>`, the exact defect its comment named | Now `.some(key => key.includes(sessionId))`. Mutation: storing the raw id as the key fails 3 tests including this one |
+| V2 | **VACUOUS** — the "empty session cookie" block in `session-cookie.spec.ts` passed for *any* input (the stub answered `null` regardless), and its comment claimed a key-level check it never made | **Deleted from that file**, and replaced with a real-path test in `session-redis.auth-strategy.spec.ts`. First two replacement attempts were *also* vacuous — one mirrored the production gate instead of exercising it, the second double-wrapped the cookie helper, whose `''` argument means "no header at all" — and both were caught by mutation, not by reading. Final form asserts **no Redis lookup happens** for an empty cookie. Mutation: removing `if (!sessionId) return null` fails it, restore passes |
+| V3 | **INACCURATE COMMENT** — `repository-contract.ts:9-11` and `sequelize-factory.ts:10-13` claimed the SQL adapters are verified against the migration SQL alone | Both corrected: the schema under test is migrations **plus** `alignSchemaWithAdapters`, so the suite proves the adapters *agree* — not that the shipped migration produces the schema they agree on |
+| V4 | **INACCURATE COMMENT** — `login-lockout.integration-spec.ts:227` said "no S-number yet" for a finding the ledger already assigned **S21** | Corrected to name S21 |
+| V5 | **INACCURATE COMMENT** — `migrations-schema.integration-spec.ts:7-9` claimed it "compares the two directly"; it never reads `schema.prisma` | Corrected: `SCHEMA_COLUMNS`/`UNIQUE_KEYS` are a hand-written transcription, so it catches **migration-side drift only** — a column added to `schema.prisma` passes silently. Recorded as open work |
+| V6 | **VACUOUS (minor)** — `rbac.seed.spec.ts` tested a transcription of the seeder's private `resolveGrant` rule, not the rule | Header comment corrected to state exactly that: it validates the baseline *data* against the rule's grammar (real value — a bad grant name is a boot-time failure), and does **not** track the seeder's code |
+
+V2 is worth dwelling on: **the first two attempts to fix a vacuous test were themselves
+vacuous, and only mutation caught them.** Reading the code would not have. That is
+`orchestrate-skill.md` §10 earning its place — a green test proves nothing about *what* it pins.
+
+### Wave 9 final gate (after the verifier fixes)
+
+```
+pnpm exec tsc --noEmit -p tsconfig.json  0
+pnpm exec oxlint src/ test/              0
+pnpm test                                29 files / 256 passed
+pnpm test:contract                        4 files / 108 passed
+pnpm test:integration                     6 files /  46 passed  (+2 expected fail)
+pnpm test:e2e                             2 files /  82 passed  (+2 expected fail)
+pnpm test:smoke                           16/16 checks, exit 0
+pnpm build                                0
+node dist/main.js                         boots; /auth/register → 201, /auth/me → 401
+```
+`git diff --stat src/` is `main.ts` (the Wave 0 `configureApp` extraction) plus one spec file —
+no production file was changed by this wave except that extraction.
+
+---
+
+## Wave 10 — production fixes surfaced by the test suite ✅ (2026-09-14)
+
+The Wave 9 suite did its job: it found defects that had been invisible for eight waves. This
+wave fixes the ones worth fixing rather than only recording them, per the user's direction
+("do whatever you think is most right for this project"). **Every change below is a deliberate
+production change**, not a test-only edit — this is the first wave since Wave 8 to touch
+runtime behaviour.
+
+### 1. S17 + S18 — the migrated schema now matches what all four adapters declare
+
+**New migration:** `src/database/migrations/20260914000001_timestamptz_and_column_defaults/`
+
+Two deliberate, DB-side changes:
+
+- **Column defaults.** `20260911000000_init` gave no default to any `id` column, nor to
+  `users.updated_at` / `roles.updated_at`. `drizzle/schema.ts` declares `.defaultRandom()` and
+  `.defaultNow()` and emits `DEFAULT` in its inserts, and `DEFAULT` against a column with no
+  default is NULL — so **`DB_PROVIDER=drizzle` could not insert a single row**, and 22 of its
+  27 contract tests failed. `gen_random_uuid()` (built in from PG 13) and `now()` are now
+  DB-side. This is inert for Prisma and Sequelize, which supply both values client-side.
+- **`TIMESTAMP(3)` → `TIMESTAMPTZ(3)`**, with `USING … AT TIME ZONE 'UTC'` stating the
+  assumption the old data was written under (both Prisma and node send UTC wall-clock). The
+  migration was the odd one out against Drizzle's `withTimezone: true` and Sequelize's
+  `DataTypes.DATE` → `timestamptz` — and it was the wrong one. `timestamptz` is what Postgres
+  and Prisma both recommend, and this was not merely cosmetic: node-pg parses a **zoneless**
+  timestamp as *local* time, so on this non-UTC host the same instant round-tripped shifted
+  through Drizzle and Sequelize while Prisma read it as UTC.
+
+**Also changed to match:** `src/database/prisma/schema.prisma` — every `DateTime` is now
+annotated `@db.Timestamptz(3)`, so `prisma migrate` cannot drift back.
+
+**Deleted:** `alignSchemaWithAdapters()` in `test/contract/support/postgres-admin.ts`.
+
+That deletion is the point of the whole item. The contract suite was passing for Drizzle only
+because a **test-time patch** rewrote the schema to match Drizzle's own declarations — i.e. the
+suite proved the adapters agreed *given a schema production did not have*. With the fix in a
+real migration, the DDL replayed is the DDL that ships, and a reappearance of either drift
+fails the suite instead of being patched away.
+
+**Evidence it is load-bearing:** removing just this migration turns the contract suite into
+**23 Drizzle failures** (`null value in column "id" of relation "users" violates not-null
+constraint`); restoring it returns 108/108 across all four providers.
+
+### 2. S19 — `refresh` now fails closed on a Redis outage
+
+`src/auth-strategies/session-redis/session-redis.auth-strategy.ts`
+
+`validateRequest` caught Redis failures and answered a clean 401; `refresh` did not, so the
+same outage produced a raw ioredis error through the exception filter (≈500) on the refresh
+path. A dead Redis cannot mean *"you are logged out"* on every guarded route while meaning
+*"the server broke"* on refresh. `refresh` now goes through
+`asUnauthenticatedOnRedisFailure`, which re-throws an existing `UnauthorizedException`
+untouched (so a genuinely invalid credential keeps its own message) and maps anything else to
+the same `Session is invalid or expired` 401.
+
+**A test had to be inverted.** `test/integration/session-redis.integration-spec.ts` contained
+`surfaces an unreachable Redis from refresh as a driver error, not a clean 401` — it pinned the
+**bug** as expected behaviour. That is the Wave 6 `isSystem` anti-pattern in miniature: a
+passing test that encodes a defect as the rule. It now asserts the fix (`UnauthorizedException`,
+same message as `validateRequest`), so the two paths cannot drift apart again.
+
+### 3. S22 — the app now releases its connections on shutdown
+
+Nothing implemented a teardown hook, so `app.close()` released nothing and the process never
+exited. Three deliberate changes:
+
+| File | Change |
+|---|---|
+| `src/database/database.module.ts` | `DatabaseLifecycle` (`OnApplicationShutdown`) closes whichever client `DB_PROVIDER` built |
+| `src/common/security/login-attempt.service.ts` | implements `OnModuleDestroy`; quits its own client |
+| `src/rbac-strategies/rbac-strategies.module.ts` | `RedisClientLifecycle` quits `REDIS_CLIENT`; the Redis-free stub answers `quit` as a no-op, so shutdown is uniform |
+
+`closeDbClient` dispatches on the client's **shape, not `instanceof`** — deliberately. The same
+package resolved through two module registries yields two distinct constructors, so a valid
+`PrismaClient` fails `instanceof PrismaClient` and silently falls through to the wrong branch.
+That is not hypothetical: the first implementation used `instanceof` and broke the e2e suite
+with `Cannot read properties of undefined (reading 'end')`. Each of the four handles has a
+distinctive method (`$client.end` / `$disconnect` / `close` + `readyState`), so it asks for the
+method.
+
+**The smoke script is the proof.** `test/smoke/boot.smoke.ts` previously needed a forced
+`process.exit` because after all 16 checks passed the process **hung open indefinitely**. That
+exit is now removed, and the script **exits on its own in ~13s**. If it ever starts hanging
+again, teardown has regressed.
+
+### 4. Unhandled ioredis error events
+
+Both hand-built ioredis clients — `LoginAttemptService`'s and `REDIS_CLIENT` — were constructed
+with no `'error'` listener. `ioredis` is an EventEmitter, and an `error` event with no
+subscriber is logged as `[ioredis] Unhandled error event`, which is what made the
+deliberate "Redis DOWN ⇒ fails open" integration test print something that reads like a
+failure. `withRedis` cannot cover this: it catches failures of individual *commands*, and this
+is a separate, connection-level channel. Both now attach a listener that logs a warning and
+does not throw.
+
+### Deliberate test changes in this wave
+
+- `test/support/e2e-setup.ts` + `test/support/harness.ts` — the ioredis stand-ins gained `on()`
+  and `quit()`. A stand-in that cannot accept an error listener or a quit is not standing in
+  for ioredis; adding the listener broke the e2e suite until the mock matched the interface.
+- `src/common/security/login-attempt.service.spec.ts` — **3 new tests** driving the *real*
+  `createClient` and `onModuleDestroy` (every prior test in that file replaced `createClient`
+  through the subclass seam, so the new code would otherwise have been uncovered). Both are
+  mutation-checked: removing the listener fails one, making `onModuleDestroy` a no-op fails the
+  other. The coverage threshold caught this — `src/common/security/**` fell to 85.7% lines
+  against a 96% floor, and the fix was to **add the tests, not lower the floor**.
+
+### Wave 10 gate
+
+```
+pnpm build                               0
+pnpm exec tsc --noEmit -p tsconfig.json  0
+pnpm exec oxlint src/ test/              0
+pnpm test                                29 files / 259 passed
+pnpm test:contract                        4 files / 108 passed   ← against the unpatched schema
+pnpm test:integration                     6 files /  46 passed  (+2 expected fail)
+pnpm test:e2e                             2 files /  82 passed  (+2 expected fail)
+pnpm test:smoke                           16/16, exits on its own in ~13s
+pnpm test:cov                             0 — all per-directory thresholds met
+node dist/main.js                         boots; /auth/register → 201, /auth/me → 401
+```
+
+### Items closed by this wave
+
+| Id | Was | Now |
+|---|---|---|
+| **S17** | `DB_PROVIDER=drizzle` cannot insert against the migrated schema | **FIXED** — migration + Prisma schema annotation; suite runs unpatched |
+| **S18** | Migration/ORM timestamp-type drift (zoneless, host-dependent shift) | **FIXED** — `TIMESTAMPTZ(3)` |
+| **S19** | `refresh` does not fail closed on a Redis outage | **FIXED** — 401, matching `validateRequest` |
+| **S22** | No `onModuleDestroy`; `app.close()` leaks Prisma/Redis handles | **FIXED** — three lifecycle hooks; smoke exits unaided |
+| — | Unhandled ioredis `error` events on both hand-built clients | **FIXED** — listeners attached |
+
+### Still open, deliberately not fixed here
+
+- **S20** (a soft-deleted account permanently reserves its email) — the clean fix is a partial
+  unique index `WHERE deleted_at IS NULL`, which is a **product decision** about whether an
+  address becomes reusable after deletion. Not mine to make silently. Pinned by a test.
+- **S21** (deactivating an account does not revoke its live session) — the fix is a design
+  choice (re-read the account on every `validateRequest`, defeating the session cache, or revoke
+  sessions on a deactivation path that does not exist yet). Quarantined with `it.fails`.
+- **S2**, **S13** — unchanged, still quarantined and tracked.

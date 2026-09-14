@@ -1,4 +1,13 @@
-import { Global, Module, type DynamicModule, type Provider } from '@nestjs/common';
+import {
+  Global,
+  Inject,
+  Injectable,
+  Logger,
+  Module,
+  type DynamicModule,
+  type OnApplicationShutdown,
+  type Provider,
+} from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { AUTHZ_PROVIDER_TOKEN, REDIS_CLIENT, USER_REPOSITORY } from '../common/constants.js';
 import { AppConfig } from '../config/app-config.service.js';
@@ -21,7 +30,11 @@ export class RbacStrategiesModule {
   static register(): DynamicModule {
     return {
       module: RbacStrategiesModule,
-      providers: [createRedisClientProvider(), createAuthorizationProviderProvider()],
+      providers: [
+        createRedisClientProvider(),
+        createAuthorizationProviderProvider(),
+        RedisClientLifecycle,
+      ],
       exports: [AUTHZ_PROVIDER_TOKEN],
     };
   }
@@ -61,9 +74,36 @@ function createRedisClientProvider(): Provider {
   };
 }
 
+/**
+ * Closes `REDIS_CLIENT` when the app shuts down.
+ *
+ * The client is built by a factory, so the teardown needs a provider of its own — and without
+ * one the `db-live` cache keeps a socket and a reconnect timer open, so the process never
+ * exits after `app.close()` and `main.ts`'s `enableShutdownHooks()` tears down with the
+ * connection still up. `quit()` is issued through the stub harmlessly because the stub answers
+ * it with a no-op (see `createThrowingStub`).
+ */
+@Injectable()
+export class RedisClientLifecycle implements OnApplicationShutdown {
+  constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
+
+  async onApplicationShutdown(): Promise<void> {
+    await this.redis.quit();
+  }
+}
+
+const redisClientLogger = new Logger('RedisClient');
+
 function createRedisClient(config: AppConfig): Redis {
   if (config.RBAC_STRATEGY === 'db-live' && config.REDIS_URL) {
-    return new Redis(config.REDIS_URL);
+    const client = new Redis(config.REDIS_URL);
+    // `ioredis` is an EventEmitter, and an `error` event with no listener is logged by
+    // ioredis as an "Unhandled error event". Command failures are handled where the cache
+    // calls are made; this covers the connection-level channel, which is otherwise bare.
+    client.on('error', (error: Error) => {
+      redisClientLogger.warn(`Redis error for the db-live cache: ${error.message}`);
+    });
+    return client;
   }
   return createThrowingStub('REDIS_CLIENT is unavailable: REDIS_URL is not set for this RBAC_STRATEGY');
 }
@@ -73,6 +113,10 @@ function createRedisClient(config: AppConfig): Redis {
  * throws. The keys Nest itself probes — the thenable check, symbols, and the lifecycle
  * hooks it looks for on every provider — resolve to `undefined` instead, so DI and app
  * shutdown still succeed.
+ *
+ * `quit` is the one deliberate exception: `RedisClientLifecycle` calls it on shutdown, so it
+ * resolves to a no-op rather than `refuse`. Shutdown is not the place to discover that this
+ * app never had a Redis — there is nothing to close and nothing to report.
  */
 function createThrowingStub(reason: string): Redis {
   const refuse = (): never => {
@@ -83,6 +127,7 @@ function createThrowingStub(reason: string): Redis {
       if (typeof property === 'symbol' || NEST_PROBE_KEYS.has(property)) {
         return Reflect.get(target, property);
       }
+      if (property === 'quit') return async (): Promise<'OK'> => 'OK';
       return refuse;
     },
   });

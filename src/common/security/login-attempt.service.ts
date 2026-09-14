@@ -1,4 +1,4 @@
-import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import { Redis } from 'ioredis';
 import { AppConfig } from '../../config/app-config.service.js';
 
@@ -21,7 +21,7 @@ const WINDOW_SECONDS = 15 * 60;
  * `REDIS_CLIENT`, so the token is not injectable from the feature modules.
  */
 @Injectable()
-export class LoginAttemptService implements OnModuleInit {
+export class LoginAttemptService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(LoginAttemptService.name);
   private readonly redis: Redis | null;
 
@@ -29,9 +29,21 @@ export class LoginAttemptService implements OnModuleInit {
     this.redis = config.REDIS_URL === undefined ? null : this.createClient(config.REDIS_URL);
   }
 
-  /** The one place a connection is opened — the specs subclass this to hand in a fake. */
+  /**
+   * The one place a connection is opened — the specs subclass this to hand in a fake.
+   *
+   * The `error` listener is not optional. `ioredis` is an EventEmitter, and an `error` event
+   * with no listener is logged by ioredis as an "Unhandled error event" and would otherwise be
+   * an unhandled emitter error. `withRedis` catches failures of individual *commands*, but a
+   * connection-level failure is a different channel: when Redis is unreachable — precisely the
+   * fail-open case this service is built around — every logged error came from here.
+   */
   protected createClient(url: string): Redis {
-    return new Redis(url);
+    const client = new Redis(url);
+    client.on('error', (error: Error) => {
+      this.logger.warn(`Redis error for the login lockout — failing open: ${error.message}`);
+    });
+    return client;
   }
 
   onModuleInit(): void {
@@ -40,6 +52,15 @@ export class LoginAttemptService implements OnModuleInit {
         'Per-account login lockout is INACTIVE: REDIS_URL is not set, so login is rate-limited per IP only.',
       );
     }
+  }
+
+  /**
+   * Without this the client outlives the app: `ioredis` keeps a socket and a reconnect timer
+   * open, so the process does not exit after `app.close()` and `main.ts`'s
+   * `enableShutdownHooks()` tears down with the connection still up.
+   */
+  async onModuleDestroy(): Promise<void> {
+    if (this.redis !== null) await this.redis.quit();
   }
 
   async recordFailure(email: string): Promise<number> {

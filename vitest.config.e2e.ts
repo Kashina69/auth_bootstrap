@@ -7,6 +7,9 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.e2e-spec.ts'],
+    // Registers the ioredis stand-in for every e2e file. It is scoped to this config on
+    // purpose: the integration suite imports the same harness against a real Redis.
+    setupFiles: ['./test/support/e2e-setup.ts'],
     // The env schema refuses to boot without valid secrets, so e2e boots against a
     // throwaway HS256 config instead of a checked-in .env file.
     env: {
