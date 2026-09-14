@@ -45,6 +45,10 @@ async function registerCsrfProtectionForCookieSessions(
  * plan.md §8: an explicit allow-list, never `*`. An unset list leaves CORS off rather than
  * falling back to a permissive default. Credentials follow the cookie session, since a
  * browser only attaches the session cookie cross-origin when the server opts in.
+ *
+ * `methods` is explicit because the plugin default answers preflights with only
+ * GET/HEAD/POST, which silently blocks the API's own DELETE routes (detach
+ * permissions, delete role/permission) for every browser client.
  */
 async function registerCors(app: NestFastifyApplication, config: AppConfig): Promise<void> {
   const allowedOrigins = config.CORS_ORIGINS;
@@ -52,6 +56,7 @@ async function registerCors(app: NestFastifyApplication, config: AppConfig): Pro
   await app.register(fastifyCors, {
     origin: allowedOrigins,
     credentials: config.AUTH_STRATEGY === 'session-redis',
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   });
 }
 
