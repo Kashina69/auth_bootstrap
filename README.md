@@ -2,7 +2,15 @@
 
 Drop-in, DB-backed, ORM-agnostic authentication + RBAC module for NestJS 12 (Fastify).
 
-## Current state (checkpoint 2026-09-11 — waves 1–4 of 8 done)
+## Current state + how to resume (waves 1–4 of 8 done; re-verified 2026-09-14)
+
+**To resume:** read `.agents/plan/MEMORY.md` (running build log + latest checkpoint) first,
+then dispatch Wave 5's agents as subagents per `plan.agent.md` §3 — each given `STYLE.md`
+plus the relevant `CONTRACTS.md`/`plan.md` slice, restricted to its owned paths, with the
+frozen signatures in `CONTRACTS.md` §10 unchanged. Run the per-wave conformance check
+(`pnpm build` + `pnpm test` green, owned paths respected) before dispatching the wave after.
+No `src/` scanning is needed to pick this up — these docs are the source of truth.
+
 
 The build is driven by a multi-agent plan under `.agents/plan/`:
 

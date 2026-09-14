@@ -119,3 +119,21 @@ Open items / risks:
   session key (admin forced-logout is a later wave).
 - **Redis/Postgres live paths untested** — unit tests use mocks; e2e (Wave 8) will need
   live services or further mocking.
+
+### Checkpoint — re-verified (2026-09-14)
+
+No code or interface changes since the 2026-09-11 checkpoint; the working tree is clean at
+commit `bce32e4`. State re-confirmed by re-running the gate:
+
+- `pnpm build` → exit **0**.
+- `pnpm test` → exit **0**, **6 files / 48 tests passed**.
+- `grep -rn NotImplementedException src/` → **no matches**. All four Wave 4 strategy folders
+  (`auth-strategies/jwt-stateless`, `auth-strategies/session-redis`,
+  `rbac-strategies/embedded-claims`, `rbac-strategies/db-live`) are implemented, not stubs.
+- Spot-verified the recorded decisions still hold in code: `IAuthStrategy.login(user, meta)`
+  (Design B), and `JwtStatelessAuthStrategy(refreshTokens, users, jwt, config)` matching
+  CONTRACTS §10; `UserRepository.assignRole` present.
+
+No new decisions and no new open items — the open-items list above is unchanged and current.
+Wave 5 remains **not dispatched**. Nothing in this re-verification alters the frozen
+interfaces in CONTRACTS.md.
