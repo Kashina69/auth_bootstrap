@@ -611,3 +611,34 @@ Facts established while writing them (all grep-verified, none assumed):
   byte-identical. A failing assertion is then a port defect, not a test to adjust.
 
 Neither playbook changes any code. They are documentation only.
+
+### TEST-PLAN.md added (2026-09-14)
+
+A build plan for the test suite, written for a fresh orchestrator chat: `.agents/plan/TEST-PLAN.md`.
+Named `TEST-PLAN.md`, **not** `plan.md`, because the architecture plan already owns that name.
+
+It is grounded in verified gaps, not a generic checklist. Before writing it I checked each
+suspicion, and two were wrong — recorded here so nobody repeats the check:
+
+- **The JWT security spine IS well tested.** `jwt-stateless.auth-strategy.spec.ts` already covers
+  `RefreshTokenService` (hash-only persistence, rotation within a family, replay → whole-family
+  revocation, unknown/expired) and JWT pinning (RS256 keypair, **HS256 forged with the public key
+  as the HMAC secret** — the classic algorithm-confusion attack — and wrong issuer/audience). An
+  earlier draft of the plan was about to claim this was untested. It is not.
+- **Email case-normalization is service-boundary, so a naive contract test would mislead** — see
+  S10, which the contract suite is designed to force to a decision.
+
+The gaps that are real, each confirmed by inspection at HEAD:
+
+| Gap | Evidence |
+|---|---|
+| `src/database/` has **zero** tests | `find src/database -name "*.spec.ts" \| wc -l` → `0`. 16 repository implementations across 4 ORMs, never executed by any test — the e2e substitutes them with in-memory fakes |
+| GraphQL is **never** exercised by e2e | `grep -c "graphql" test/auth.e2e-spec.ts` → `0`. It would have caught **S13** |
+| Coverage is measured by nothing | `@vitest/coverage-v8` + a `test:cov` script exist, but no `coverage` block, no thresholds, not in the gate |
+| The e2e harness duplicates `main.ts` and drifts | `MEMORY.md` records it; the `session-redis` CSRF registration is silently uncovered |
+| Untested units on the security path | `session-cookie.ts` (hand-rolled parser), `authz-context-cache.ts` (key collision = cross-user leak), `token.service.ts`, `transform.interceptor.ts` (client-visible envelope), `timeout.interceptor.ts`, the decorators, the DTOs, the seed |
+
+The plan's central proposal is a **repository contract suite** — one shared behavioural contract
+file run against all four ORM adapters, the same "one spec file, N providers" trick Phase 13 used
+for the auth strategies. It is the only practical way to test 16 adapter files, and it forces
+S10 and S11 to a decision instead of leaving them as notes.
