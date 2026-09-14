@@ -45,6 +45,17 @@ orchestrator accepts a wave. Paste it in full into every worker's dispatch promp
   in services, one responsibility per module. "Minimalistic" means no extra layers on top
   of Nest's own idioms — not skipping the idioms.
 
+- **A globally-registered enhancer must handle every transport the app serves.** Anything
+  registered via `APP_GUARD` / `APP_INTERCEPTOR` / `APP_FILTER` or `app.useGlobal*()` runs for
+  **GraphQL resolvers as well as HTTP routes**. Never call `context.switchToHttp()` /
+  `host.switchToHttp()` unconditionally — branch on `context.getType<'graphql'>() === 'graphql'`
+  and use `GqlExecutionContext`, the way `common/guards/auth.guard.ts` does. Wave 7 lost three
+  separate runtime crashes (interceptor, exception filter, throttler guard) to this, none of
+  which the build, tests, typecheck, lint, a clean boot, or a code-reading review could see.
+  **Corollary:** do not "fix" such a crash by *skipping* the enhancer for non-HTTP contexts —
+  that silently removes the protection from the GraphQL surface, which for an auth guard is a
+  bypass, not a convenience.
+
 ## Orchestrator enforcement
 
 As part of the Wave conformance check, reject any diff where:

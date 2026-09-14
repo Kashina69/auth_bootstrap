@@ -1,11 +1,18 @@
 import { ApolloDriver, type ApolloDriverConfig } from '@nestjs/apollo';
 import { Module } from '@nestjs/common';
 import { GraphQLModule } from '@nestjs/graphql';
+import type { ValidationRule } from 'graphql';
+import depthLimit from 'graphql-depth-limit';
+import { createComplexityRule, simpleEstimator } from 'graphql-query-complexity';
 import { join } from 'node:path';
 import { AppConfig } from '../config/app-config.service.js';
 
 /** The generated SDL is written next to the source so schema changes show up in review. */
 const SCHEMA_FILE = join(process.cwd(), 'src/schema.gql');
+
+/** plan.md §8: bound how far one request can amplify, so a single query cannot fan out freely. */
+const MAX_QUERY_DEPTH = 10;
+const MAX_QUERY_COMPLEXITY = 1000;
 
 /**
  * The GraphQL half of the parity pattern (plan.md §10). Code-first: the schema is derived
@@ -33,5 +40,13 @@ function graphqlOptions(config: AppConfig): ApolloDriverConfig {
     sortSchema: true,
     introspection: !isProduction,
     playground: !isProduction,
+    validationRules: [depthLimit(MAX_QUERY_DEPTH), complexityLimit()],
   };
+}
+
+function complexityLimit(): ValidationRule {
+  return createComplexityRule({
+    maximumComplexity: MAX_QUERY_COMPLEXITY,
+    estimators: [simpleEstimator({ defaultComplexity: 1 })],
+  });
 }

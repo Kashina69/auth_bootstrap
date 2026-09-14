@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuthStrategiesModule } from './auth-strategies/auth-strategies.module.js';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
+import { GraphqlThrottlerGuard } from './common/guards/graphql-throttler.guard.js';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor.js';
 import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor.js';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor.js';
@@ -21,6 +24,9 @@ import { RbacStrategiesModule } from './rbac-strategies/rbac-strategies.module.j
  */
 @Module({
   imports: [
+    // A generous global floor for every route; the auth endpoints tighten it per-route
+    // with `@Throttle(...)`, which overrides these values for the `default` throttler.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     AppConfigModule,
     DatabaseModule.register(),
     AuthStrategiesModule.register(),
@@ -30,6 +36,13 @@ import { RbacStrategiesModule } from './rbac-strategies/rbac-strategies.module.j
     RbacAdminModule,
   ],
   controllers: [AppController],
-  providers: [AppService, HttpExceptionFilter, LoggingInterceptor, TimeoutInterceptor, TransformInterceptor],
+  providers: [
+    AppService,
+    HttpExceptionFilter,
+    LoggingInterceptor,
+    TimeoutInterceptor,
+    TransformInterceptor,
+    { provide: APP_GUARD, useClass: GraphqlThrottlerGuard },
+  ],
 })
 export class AppModule {}

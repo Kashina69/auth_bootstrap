@@ -18,6 +18,9 @@ export class LoggingInterceptor implements NestInterceptor {
   private readonly logger = new Logger('HTTP');
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
+    // A GraphQL execution has no HTTP method or url to log, and `switchToHttp()` yields no
+    // request for it — logging that shape would crash every resolver.
+    if (context.getType<'graphql'>() === 'graphql') return next.handle();
     const request = context.switchToHttp().getRequest<FastifyRequest>();
     const startedAt = Date.now();
     this.logger.log(`--> ${request.method} ${request.url} body=${stringifyRedacted(request.body)}`);

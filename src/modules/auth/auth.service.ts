@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { AuthResult, IAuthStrategy, RequestMeta } from '../../auth-strategies/auth-strategy.interface.js';
 import { AUTH_STRATEGY_TOKEN, ROLE_REPOSITORY, USER_REPOSITORY } from '../../common/constants.js';
+import { LoginAttemptService } from '../../common/security/login-attempt.service.js';
 import { PasswordService } from '../../common/security/password.service.js';
 import type { RoleRepository } from '../../database/repositories/role.repository.js';
 import type { User, UserRepository } from '../../database/repositories/user.repository.js';
@@ -42,6 +43,7 @@ export class AuthService {
     @Inject(ROLE_REPOSITORY) private readonly roles: RoleRepository,
     @Inject(AUTH_STRATEGY_TOKEN) private readonly strategy: IAuthStrategy,
     private readonly passwords: PasswordService,
+    private readonly attempts: LoginAttemptService,
   ) {}
 
   async register(dto: RegisterDto, meta: RequestMeta): Promise<AuthResult> {
@@ -51,7 +53,10 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, meta: RequestMeta): Promise<AuthResult> {
-    const user = await this.verifyCredentials(dto);
+    const email = normalizeEmail(dto.email);
+    await this.assertNotLocked(email);
+    const user = await this.verifyCredentials(email, dto.password);
+    await this.attempts.clear(email);
     assertAccountIsActive(user);
     return this.issueSession(user, meta);
   }
@@ -83,12 +88,26 @@ export class AuthService {
     await this.users.assignRole(userId, role.id);
   }
 
-  private async verifyCredentials(dto: LoginDto): Promise<User> {
-    const user = await this.users.findByEmail(normalizeEmail(dto.email));
+  /**
+   * The cheap check runs first (spec §6) — a locked address is refused before any argon2
+   * work — but the reply is the generic one, so it never confirms the account exists.
+   */
+  private async assertNotLocked(email: string): Promise<void> {
+    if (await this.attempts.isLocked(email)) throw new UnauthorizedException(INVALID_CREDENTIALS);
+  }
+
+  private async verifyCredentials(email: string, password: string): Promise<User> {
+    const user = await this.users.findByEmail(email);
     // Runs against the dummy hash when the account is absent, so both branches cost one
     // argon2 verification and one identical error below.
-    const passwordMatches = await this.passwords.verify(user?.passwordHash ?? ABSENT_USER_HASH, dto.password);
-    if (user === null || !passwordMatches) throw new UnauthorizedException(INVALID_CREDENTIALS);
+    const passwordMatches = await this.passwords.verify(user?.passwordHash ?? ABSENT_USER_HASH, password);
+    if (user === null) throw new UnauthorizedException(INVALID_CREDENTIALS);
+    if (!passwordMatches) {
+      // Only a genuinely wrong password counts (spec §6): an absent address has no account
+      // for the lock to protect, so counting it would store pure noise.
+      await this.attempts.recordFailure(email);
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
+    }
     return user;
   }
 

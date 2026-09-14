@@ -50,4 +50,13 @@ export class AppConfig {
   get REDIS_URL(): Env['REDIS_URL'] {
     return this.config.get('REDIS_URL', { infer: true });
   }
+
+  /** Comma-separated in the environment; unset or empty means no origin is allowed. */
+  get CORS_ORIGINS(): string[] {
+    const configured = this.config.get('CORS_ORIGINS', { infer: true }) ?? '';
+    return configured
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter((origin) => origin !== '');
+  }
 }

@@ -18,6 +18,10 @@ export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
 
   catch(exception: unknown, host: ArgumentsHost): void {
+    // A GraphQL request has no HTTP response to write here, and `switchToHttp()` yields no
+    // request for it. Rethrowing hands the exception back to the GraphQL layer, which is
+    // what formats it into the standard `errors[]` array.
+    if (host.getType<'graphql'>() === 'graphql') throw exception;
     const context = host.switchToHttp();
     const request = context.getRequest<FastifyRequest>();
     const response = context.getResponse<FastifyReply>();

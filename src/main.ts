@@ -1,3 +1,4 @@
+import fastifyCors from '@fastify/cors';
 import fastifyCsrfProtection from '@fastify/csrf-protection';
 import fastifyHelmet from '@fastify/helmet';
 import { Logger, ValidationPipe } from '@nestjs/common';
@@ -18,6 +19,7 @@ async function bootstrap(): Promise<void> {
   const config = app.get(AppConfig);
   await registerSecurityHeaders(app);
   await registerCsrfProtectionForCookieSessions(app, config);
+  await registerCors(app, config);
   registerGlobalValidation(app);
   registerGlobalInterceptors(app);
   registerGlobalFilters(app);
@@ -37,6 +39,20 @@ async function registerCsrfProtectionForCookieSessions(
 ): Promise<void> {
   if (config.AUTH_STRATEGY !== 'session-redis') return;
   await app.register(fastifyCsrfProtection, { cookieOpts: { signed: true } });
+}
+
+/**
+ * plan.md §8: an explicit allow-list, never `*`. An unset list leaves CORS off rather than
+ * falling back to a permissive default. Credentials follow the cookie session, since a
+ * browser only attaches the session cookie cross-origin when the server opts in.
+ */
+async function registerCors(app: NestFastifyApplication, config: AppConfig): Promise<void> {
+  const allowedOrigins = config.CORS_ORIGINS;
+  if (allowedOrigins.length === 0) return;
+  await app.register(fastifyCors, {
+    origin: allowedOrigins,
+    credentials: config.AUTH_STRATEGY === 'session-redis',
+  });
 }
 
 function registerGlobalValidation(app: NestFastifyApplication): void {

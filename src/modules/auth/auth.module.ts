@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { LoginAttemptService } from '../../common/security/login-attempt.service.js';
 import { PasswordService } from '../../common/security/password.service.js';
 import { AuthController } from './auth.controller.js';
 import { AuthResolver } from './auth.resolver.js';
@@ -12,6 +13,6 @@ import { AuthService } from './auth.service.js';
  */
 @Module({
   controllers: [AuthController],
-  providers: [AuthService, PasswordService, AuthResolver],
+  providers: [AuthService, PasswordService, LoginAttemptService, AuthResolver],
 })
 export class AuthModule {}

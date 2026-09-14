@@ -18,6 +18,7 @@ export const envSchema = z
     JWT_PUBLIC_KEY: z.string().optional(),
     JWT_SECRET: z.string().min(32).optional(),
     REDIS_URL: z.string().url().optional(),
+    CORS_ORIGINS: z.string().optional(),
   })
   .superRefine((val, ctx) => {
     if (val.JWT_ALGORITHM === 'RS256' && (!val.JWT_PRIVATE_KEY || !val.JWT_PUBLIC_KEY)) {

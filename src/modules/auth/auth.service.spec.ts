@@ -1,5 +1,7 @@
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import type { AuthResult, IAuthStrategy } from '../../auth-strategies/auth-strategy.interface.js';
+import type { AppConfig } from '../../config/app-config.service.js';
+import { LoginAttemptService } from '../../common/security/login-attempt.service.js';
 import { PasswordService } from '../../common/security/password.service.js';
 import type { Role, RoleRepository } from '../../database/repositories/role.repository.js';
 import type { User, UserRepository } from '../../database/repositories/user.repository.js';
@@ -76,10 +78,41 @@ function createFakeStrategy() {
   return { seen, strategy };
 }
 
+/** Records the lockout calls in memory, so the wiring is asserted without Redis. */
+class FakeLoginAttempts extends LoginAttemptService {
+  locked = false;
+  readonly failures: string[] = [];
+  readonly cleared: string[] = [];
+
+  constructor() {
+    super({ REDIS_URL: undefined } as AppConfig);
+  }
+
+  override isLocked(): Promise<boolean> {
+    return Promise.resolve(this.locked);
+  }
+
+  override recordFailure(email: string): Promise<number> {
+    this.failures.push(email);
+    return Promise.resolve(this.failures.length);
+  }
+
+  override clear(email: string): Promise<void> {
+    this.cleared.push(email);
+    return Promise.resolve();
+  }
+}
+
 function createService() {
   const users = createFakeUsers();
   const { seen, strategy } = createFakeStrategy();
-  return { users, seen, service: new AuthService(users.repository, roles, strategy, new PasswordService()) };
+  const attempts = new FakeLoginAttempts();
+  return {
+    users,
+    seen,
+    attempts,
+    service: new AuthService(users.repository, roles, strategy, new PasswordService(), attempts),
+  };
 }
 
 async function captureFailure(call: Promise<unknown>): Promise<Error> {
@@ -141,5 +174,37 @@ describe('AuthService', () => {
     await expect(service.login({ email: EMAIL, password: PASSWORD }, META)).rejects.toThrow(
       'Invalid email or password',
     );
+  });
+
+  it('fails a locked account even with the right password, on the same generic error', async () => {
+    const { attempts, seen, service } = createService();
+    await service.register({ email: EMAIL, password: PASSWORD }, META);
+    attempts.locked = true;
+    const sessionsBefore = seen.length;
+
+    const failure = await captureFailure(service.login({ email: EMAIL, password: PASSWORD }, META));
+
+    expect(failure).toBeInstanceOf(UnauthorizedException);
+    expect(failure.message).toBe('Invalid email or password');
+    expect(seen).toHaveLength(sessionsBefore);
+  });
+
+  it('records a failure for a genuinely wrong password only', async () => {
+    const { attempts, service } = createService();
+    await service.register({ email: EMAIL, password: PASSWORD }, META);
+
+    await captureFailure(service.login({ email: 'New.User@EXAMPLE.com', password: 'Wrong 1!' }, META));
+    await captureFailure(service.login({ email: 'nobody@example.com', password: PASSWORD }, META));
+
+    expect(attempts.failures).toEqual([EMAIL]);
+  });
+
+  it('clears the counter on a successful login', async () => {
+    const { attempts, service } = createService();
+    await service.register({ email: EMAIL, password: PASSWORD }, META);
+
+    await service.login({ email: EMAIL, password: PASSWORD }, META);
+
+    expect(attempts.cleared).toEqual([EMAIL]);
   });
 });

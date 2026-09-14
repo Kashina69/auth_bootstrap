@@ -107,7 +107,14 @@ pnpm test                               # exact file/test counts, must not decre
 pnpm exec tsc --noEmit -p tsconfig.json # exit 0 — NOT optional, see §8
 pnpm exec oxlint src/ test/             # exit 0
 node dist/main.js                       # boots, routes mapped, no throw
+# THEN execute real requests against the running app and assert on the responses.
 ```
+
+**The boot check must be followed by real requests.** A boot proves DI resolves; it does not
+prove anything *works*. Wave 7 found three separate crashes — in a global interceptor, the
+exception filter, and the throttler guard — that every one of `build`, `test`, `tsc`, `oxlint`,
+a clean boot, and an adversarial code-reading verifier had all passed. They were only visible
+by executing a real resolver against the running app.
 
 **`tsc --noEmit` is mandatory and was nearly missed twice.** `pnpm build` uses
 `tsconfig.build.json` which *excludes specs*, and vitest transpiles without typechecking — so
@@ -145,6 +152,28 @@ needed. The agent caught it; the orchestrator should have.
 **Before asserting a fact: open the artifact and confirm which entity, table, or class it
 belongs to.** Cheap check, expensive mistake.
 
+### 9a. Confirm the *test* measured what you think it measured
+
+Two false alarms in one session, both from checks that could not have shown what was claimed:
+
+- **Introspection queries bypass `graphql-depth-limit`.** A deep `__schema` query returned 200,
+  which was read as "the depth limit is broken". It was not — the identical query shape with a
+  non-introspection root *was* correctly flagged. The probe was incapable of detecting either
+  outcome.
+- **A hand-built execution context is not the real one.** `git`-free unit probes passed while
+  the live HTTP path crashed.
+
+Before calling something a defect, ask: *if this were working perfectly, would my check print
+the same thing?* If yes, the check is worthless. Prefer a check where pass and fail look
+different, and prefer the real path over a synthetic one.
+
+### 9b. `git checkout -- <file>` is not a revert for uncommitted work
+
+It restores from **HEAD**. If the file has uncommitted wave work, that work is destroyed — and
+if HEAD predates the wave, it looks like the agent "never did it". This cost one wave 62k to
+undo. To back out a temporary probe: `cp` the file to a scratch path first, then `cp` it back.
+Reserve `git checkout --` for reverting work that is already committed.
+
 ## 10. Mutation-check security assertions
 
 A passing test proves nothing about *what* it pins. For any security-critical guard, force the
@@ -170,6 +199,25 @@ items. This is what makes an eventual external validation pass possible without 
 | `build`+`test` green treated as sufficient gate | 3 latent type errors, 2 waves |
 | Asserting a fact from a grep without checking the entity | a whole fix-round aimed wrong |
 | Oversized wave | Wave 6 at 353k vs Wave 5's 292k |
+| Trusting a synthetic probe as proof of the real path | 2 false alarms; one fix destroyed |
+| `git checkout --` on a file holding uncommitted wave work | 62k to re-apply |
+| Registering a global guard/interceptor without checking non-HTTP contexts | 3 runtime crashes invisible to the entire gate |
+
+### 12a. Adding a global enhancer requires a GraphQL check
+
+Wave 7's three defects were one root cause: **the codebase assumes every request is HTTP.**
+Interceptors, exception filters and guards registered globally in `main.ts` / `app.module.ts`
+all ran for GraphQL resolvers too, where `switchToHttp()` yields no request. Guards written in
+Wave 5 handled this (`getRequest` branches on `context.getType<'graphql'>()`); everything
+written before GraphQL was *reachable* did not — so the defects stayed latent until Wave 6
+turned GraphQL on, then surfaced one at a time as each fix unmasked the next.
+
+**Rule:** any provider registered globally (`APP_GUARD`, `APP_INTERCEPTOR`, `APP_FILTER`, or
+`app.useGlobal*`) must be checked for non-HTTP context support at the moment it is added.
+Prefer solutions that keep the protection applied to both transports — a guard that simply
+*skips* non-HTTP contexts silently removes that protection from the GraphQL surface, which for
+`login`/`register`/`refresh` (exposed as both REST and GraphQL) is a brute-force bypass, not a
+convenience.
 
 ## 13. Standing rule
 

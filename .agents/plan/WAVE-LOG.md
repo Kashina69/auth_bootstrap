@@ -118,7 +118,85 @@ at boot without it.
 
 ---
 
-## Current project status (as of Wave 6, HEAD `06dfc6f`)
+## Wave 7 — security hardening ✅ (2026-09-14)
+
+Model: 2 concurrent verticals, then a **defect chain of 2 more fix agents**. **Total ≈ 339k.**
+Unlike Wave 6, the extra spend was *not* scope — it was a cascade of latent defects that each
+fix unmasked, all one root cause (see below).
+
+| Agent | Task | Tokens | Tool calls | Duration |
+|---|---|---|---|---|
+| rate-limit-agent | `LoginAttemptService`, lockout wiring, `ThrottlerModule` + global guard | 74.7k | 53 | 228s |
+| transport-hardening-agent | CORS, GraphQL depth/complexity limits | 54.8k | 44 | 171s |
+| ↳ *same agent, resumed* | *re-apply depth-limit work destroyed by orchestrator* | *62.0k* | *12* | *46s* |
+| gql-context-fix-agent | fix LoggingInterceptor + HttpExceptionFilter on GraphQL contexts | 59.5k | 49 | 243s |
+| throttler-graphql-agent | make the global throttler GraphQL-aware | 88.3k | 70 | 301s |
+
+**Gate (orchestrator, independently re-run):** build **0** · `pnpm test` **13 files / 94 passed**
+(was 12/89) · `tsc --noEmit` **0** · `oxlint src/ test/` **0** · boots with and without
+`CORS_ORIGINS`.
+
+**End-to-end HTTP verification (orchestrator, real `dist/main.js` on :3000):**
+
+| Probe | Result |
+|---|---|
+| guarded GraphQL `{ roles { id } }` | `Unauthorized` — reaches AuthGuard, no crash |
+| `{ __typename }` | 200 |
+| **GraphQL `login` mutation loop ×8** | **3 throttled — PASS, GraphQL is NOT a rate-limit bypass** |
+| REST `POST /auth/login` loop ×8 | 3 × HTTP 429 |
+
+**Dependencies resolved by orchestrator (pre-flight):** `@fastify/cors@11.3.0`,
+`graphql-depth-limit@1.1.0`, `graphql-query-complexity@2.0.0`,
+`@types/graphql-depth-limit@1.1.6` (dev).
+
+### The defect chain — one root cause, three crashes
+
+**Every global HTTP enhancer breaks on GraphQL**, because each calls `context.switchToHttp()`
+unconditionally and gets `undefined` for a GraphQL context. Latent since Wave 1; only became
+reachable when Wave 6 registered `GraphQLModule`. Each fix unmasked the next:
+
+1. `LoggingInterceptor` — `request.method` on undefined (Wave 1 file)
+2. `HttpExceptionFilter` — same, and it crashed *before* it could write a response, which is
+   what **masked** #3
+3. `ThrottlerGuard` (stock, `@nestjs/throttler@6.5.0`) — no GraphQL branch; `getTracker()` read
+   `req.ip` on undefined. Fixed by subclassing and overriding only `getRequestResponse`
+   (`src/common/guards/graphql-throttler.guard.ts`).
+
+**Security-relevant detail:** the tempting fix for #3 — skip throttling for non-HTTP contexts —
+would have been a **brute-force bypass**, because `login`/`register`/`refresh` are exposed as
+GraphQL mutations. The agent was explicitly forbidden from taking that route and required to
+prove a real throttle over GraphQL, which it did.
+
+None of the three was visible to `build`, `test`, `tsc`, `oxlint`, a clean boot, or an
+adversarial code-reading verifier. **Only executing a real resolver exposed them.**
+
+### Orchestrator errors this wave (both mine)
+
+- **Claimed a defect that did not exist.** Reported "depth limit not enforcing" from a probe
+  using an introspection query — `graphql-depth-limit` does not count introspection queries, so
+  the probe was incapable of showing a defect either way. The limit worked; a valid test proved
+  it (`400 GRAPHQL_VALIDATION_FAILED` at a lowered ceiling). Symptom also misstated: the real
+  guarded-query failure was HTTP **200** carrying an `INTERNAL_SERVER_ERROR` in `errors[]`, not
+  a bare 500.
+- **Destroyed verified agent work.** Used `git checkout -- src/graphql/graphql.module.ts` to
+  back out a temporary probe; that restores from HEAD, which predated the uncommitted changes,
+  wiping the entire depth-limit wiring. Cost **62k** to re-apply. Correct approach: `cp` the
+  file to a scratch path first.
+
+Both are now rules in `orchestrate-skill.md` (§9a, §9b).
+
+### New defect found (not fixed — recorded)
+
+- **GraphQL variables do not work.** A query declaring `$i: LoginDto!` and sending `variables`
+  is rejected at validation: `Variable "$i" of required type "LoginDto!" was not provided` /
+  the type is "not usable as an input type". Happens before guards, untouched by Wave 7, and
+  forces clients to inline literals. Surfaced incidentally by the throttler agent. **Needs a
+  dedicated look** — likely the DTO is registered as an object type rather than an input type,
+  or the `@InputType()` name collides. Recorded as **S13**.
+
+---
+
+## Current project status (as of Wave 7, HEAD to be set by the Wave 7 commit)
 
 Waves 1–6 of 8 complete. Gate: build 0 · test **10 files / 77 passed** · `tsc --noEmit` 0 ·
 oxlint 0 · boot verified.
@@ -131,21 +209,40 @@ oxlint 0 · boot verified.
 | S2 | Session cookie never attached under `session-redis` — cookie-only refresh impossible | High (if session-redis shipped) | **OPEN** |
 | S3 | Baseline permission deletion (F1) | High | FIXED + mutation-verified |
 | S4 | `auth.guard.spec.ts` absent — `@Public()` bypass, `req.user = user` untested | Medium | OPEN (Wave 8) |
-| S5 | Brute-force lockout + throttler not wired (spec §6) | High | Deferred to Wave 7 by plan §11 Phase 11 |
-| S6 | GraphQL depth/complexity limiting absent (plan line 359) | Medium | Deferred to Wave 7 |
-| S7 | `@nestjs/throttler@6.5.0` peers are Nest `^7–^11`, project is Nest 12 | Blocking for Wave 7 | OPEN — check first |
+| S5 | Brute-force lockout + throttler unwired (spec §6) | High | **FIXED in Wave 7** — verified by real throttling over both transports |
+| S6 | GraphQL depth/complexity limiting absent (plan line 359) | Medium | **FIXED in Wave 7** — verified enforcing end-to-end |
+| S7 | `@nestjs/throttler@6.5.0` peers stop at Nest `^11` | — | **RESOLVED — stale metadata.** Empirically boots and throttles on Nest 12 |
 | S8 | `rbac-core.hasRole`/`hasAnyPermission` lack the null-guard `can()` has | Low | Accepted (only `can()` gates) |
 | S9 | `deletePermission` does not fan out `invalidate()` | Low | OPEN (needs another contract method) |
 | S10 | Mongoose normalizes email in-adapter; the other 3 do not (spec §9 "identical") | Low | OPEN, pre-existing |
 | S11 | Seed `findOrCreatePermission` never updates — old rows keep `is_system = false` | Low | OPEN (no contract method to backfill) |
 | S12 | `autoSchemaFile` requires a writable `src/` in production | Low | OPEN |
+| **S13** | **GraphQL variables do not work** — `$i: LoginDto!` + `variables` rejected at validation ("not usable as an input type"); clients must inline literals | **Medium-High (API usability)** | **OPEN — found in Wave 7, not fixed** |
+| **S14** | GraphQL rate-limit responses lack `X-RateLimit-*`/`Retry-After` headers (the Apollo context never receives the Fastify `reply`); limits are identical, headers advisory-only. GraphQL also returns HTTP 200 for throttle errors (Apollo maps 429 → `INTERNAL_SERVER_ERROR`, driver resets status) | Low | Documented, by design for now |
+| **S15** | Lockout timing: spec §6 mandates the cheap `isLocked()` check *before* password verification, so a locked account answers **faster** than a wrong password — timing can reveal lockout state for a known address | Low | Accepted per spec; deliberate, not an oversight |
 
 ### Deferred / not yet built
 
-- **Wave 7** — `security-hardening-agent`: helmet/CORS/CSRF finalization, per-route throttler,
-  brute-force lockout (spec §6), GraphQL depth/complexity limits (plan line 359).
 - **Wave 8** — `frontend-kit-agent` ∥ `test-agent`: unit + e2e, `/auth/me` + `/authz/check`,
   React `usePermission()`.
+
+### Wave 7 delivered (for the validation pass to check against plan §11 Phase 11)
+
+- **CORS** — deny-all by default; activates only when `CORS_ORIGINS` (optional, comma-separated)
+  is set. `credentials: true` only under `session-redis` (ambient cookie), off under
+  `jwt-stateless`. Registered via `@fastify/cors` directly, not `app.enableCors()` — the latter
+  typechecks but would crash at boot (`skipLibCheck` hides the unresolvable import).
+- **Throttling** — `ThrottlerModule` floor (ttl 60s / limit 100) + global `GraphqlThrottlerGuard`;
+  per-route `@Throttle()` ceilings on the auth routes (register 3, login 5, refresh 5 per 60s)
+  continue to override the floor, on **both** transports.
+- **Lockout** — `LoginAttemptService` (spec §6: 15-min window, lock at 10). Degrades safely:
+  `REDIS_URL` unset (the default pairing) ⇒ no-op plus one boot warning, never throws. Fails
+  *open* on Redis errors, so an unreachable Redis cannot lock everyone out. Same
+  `INVALID_CREDENTIALS` message as every other login failure, including lockout.
+- **GraphQL limits** — `depthLimit(10)` + complexity `1000`, via the Apollo driver's
+  `validationRules`; verified enforcing with a real query.
+- Already done in Wave 1 and left alone: helmet, and CSRF (conditional on `session-redis`,
+  spec §7).
 
 ### Carried from Wave 4 (still open)
 

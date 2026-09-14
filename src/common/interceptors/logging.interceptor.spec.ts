@@ -1,5 +1,7 @@
+import type { CallHandler, ExecutionContext } from '@nestjs/common';
+import { firstValueFrom, of } from 'rxjs';
 import { describe, expect, it } from 'vitest';
-import { redactSensitiveFields } from './logging.interceptor.js';
+import { LoggingInterceptor, redactSensitiveFields } from './logging.interceptor.js';
 
 describe('redactSensitiveFields', () => {
   it('redacts every password-shaped field named in implementation.spec.md §1', () => {
@@ -27,3 +29,36 @@ describe('redactSensitiveFields', () => {
     expect(redactSensitiveFields('raw')).toBe('raw');
   });
 });
+
+describe('LoggingInterceptor', () => {
+  const handler: CallHandler = { handle: () => of('resolved') };
+
+  it('passes a GraphQL execution through untouched instead of reading a missing request', async () => {
+    const interceptor = new LoggingInterceptor();
+
+    await expect(firstValueFrom(interceptor.intercept(graphqlContext(), handler))).resolves.toBe('resolved');
+  });
+
+  it('still logs and forwards an HTTP execution', async () => {
+    const interceptor = new LoggingInterceptor();
+
+    await expect(firstValueFrom(interceptor.intercept(httpContext(), handler))).resolves.toBe('resolved');
+  });
+});
+
+/** `switchToHttp()` on a GraphQL context yields no request — reading `.method` off it is the crash. */
+function graphqlContext(): ExecutionContext {
+  return {
+    getType: () => 'graphql',
+    switchToHttp: () => ({ getRequest: () => undefined, getResponse: () => undefined }),
+  } as unknown as ExecutionContext;
+}
+
+function httpContext(): ExecutionContext {
+  const request = { method: 'GET', url: '/health', body: undefined };
+  const response = { statusCode: 200 };
+  return {
+    getType: () => 'http',
+    switchToHttp: () => ({ getRequest: () => request, getResponse: () => response }),
+  } as unknown as ExecutionContext;
+}
